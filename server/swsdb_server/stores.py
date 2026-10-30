@@ -681,28 +681,61 @@ def _decode(v: Any) -> Any:
     return v
 
 
-def _value(v: Any) -> Any:
-    """FalkorDB's verbose result values: nodes and edges come back as [[key, value], ...] pairs."""
-    v = _decode(v)
-    if isinstance(v, list) and v and all(isinstance(x, list) and len(x) == 2 and isinstance(x[0], str) for x in v):
-        d = {k: x for k, x in v}
-        if "properties" in d and ("labels" in d or "type" in d):
-            out = {"id": d.get("id"), "properties": {k: _value(x) for k, x in d["properties"]}}
-            if "labels" in d:
-                out["labels"] = d["labels"]
-            else:
-                out.update(type=d["type"], src=d.get("src_node"), dst=d.get("dest_node"))
-            return out
-    if isinstance(v, list):
-        return [_value(x) for x in v]
-    return v
+class _StaleSchema(Exception):
+    pass
+
+
+def _typed(cell: list, schema: tuple[list[str], list[str], list[str]]) -> Any:
+    """One value of FalkorDB's compact reply ([type, value]) as plain JSON: lists, maps, nodes, edges and paths keep
+    their structure, numbers and booleans their type."""
+    kind, v = cell
+    labels, types, keys = schema
+
+    def name(table: list[str], i: int) -> str:
+        if i >= len(table):
+            raise _StaleSchema
+        return table[i]
+
+    def props(raw: list) -> dict:
+        return {name(keys, k): _typed([t, x], schema) for k, t, x in raw}
+
+    if kind == 1:
+        return None
+    if kind == 2:
+        return _decode(v)
+    if kind == 3:
+        return int(v)
+    if kind == 4:
+        return _decode(v) == "true"
+    if kind == 5:
+        return float(_decode(v))
+    if kind == 6:
+        return [_typed(x, schema) for x in v]
+    if kind == 7:
+        eid, rel, src, dst, raw = v
+        return {"id": eid, "type": name(types, rel), "src": src, "dst": dst, "properties": props(raw)}
+    if kind == 8:
+        nid, lab, raw = v
+        return {"id": nid, "labels": [name(labels, i) for i in lab], "properties": props(raw)}
+    if kind == 9:
+        nodes, edges = (_typed(x, schema) for x in v)
+        return {"nodes": nodes, "edges": edges}
+    if kind == 10:
+        return {_decode(v[i]): _typed(v[i + 1], schema) for i in range(0, len(v), 2)}
+    if kind == 11:
+        return {"latitude": float(_decode(v[0])), "longitude": float(_decode(v[1]))}
+    if kind == 12:
+        return [float(_decode(x)) for x in v]
+    return _decode(v)  # dates, times, durations: as FalkorDB gives them
 
 
 class GraphStore:
-    def __init__(self, host: str = "127.0.0.1", port: int = 6379, password: str | None = None, url: str | None = None):
+    def __init__(self, host: str = "127.0.0.1", port: int = 6379, password: str | None = None,
+                 url: str | None = None):
         """The bundled FalkorDB, or an external one by `url` (redis://:password@host:6379, rediss:// for TLS)."""
         self.r = (aioredis.Redis.from_url(url, socket_timeout=60, socket_connect_timeout=5) if url else
                   aioredis.Redis(host=host, port=port, password=password, socket_timeout=60, socket_connect_timeout=5))
+        self._schemas: dict[str, tuple[list[str], list[str], list[str]]] = {}
 
     async def close(self) -> None:
         await self.r.aclose()
@@ -730,12 +763,29 @@ class GraphStore:
                     raise StoreError(f"invalid parameter name {k!r}")
             header = "CYPHER " + " ".join(f"{k}={cypher_literal(v)}" for k, v in params.items()) + " "
         res = await self._cmd("GRAPH.RO_QUERY" if read_only else "GRAPH.QUERY", name, header + query,
-                              "--timeout", int(timeout_s * 1000))
+                              "--timeout", int(timeout_s * 1000), "--compact")
         if len(res) == 1:  # write-only query: just statistics
             return {"columns": [], "rows": [], "stats": [_decode(s) for s in res[0]]}
-        columns = [_decode(c) for c in res[0]]
-        return {"columns": columns, "rows": [[_value(v) for v in row] for row in res[1]],
-                "stats": [_decode(s) for s in res[2]]}
+        columns = [_decode(c[1]) for c in res[0]]
+        for attempt in range(2):
+            try:
+                schema = await self._schema(name, refresh=attempt > 0)
+                rows = [[_typed(cell, schema) for cell in row] for row in res[1]]
+                break
+            except _StaleSchema:
+                if attempt:
+                    raise StoreError("the graph's labels or property keys changed while reading the result") from None
+        return {"columns": columns, "rows": rows, "stats": [_decode(s) for s in res[2]]}
+
+    async def _schema(self, name: str, refresh: bool = False) -> tuple[list[str], list[str], list[str]]:
+        """Labels, relationship types and property keys by id: compact replies refer to them by number."""
+        if refresh or name not in self._schemas:
+            out = []
+            for proc in ("db.labels()", "db.relationshipTypes()", "db.propertyKeys()"):
+                r = await self._cmd("GRAPH.RO_QUERY", name, f"CALL {proc}")
+                out.append([_decode(row[0]) for row in r[1]] if len(r) > 1 else [])
+            self._schemas[name] = (out[0], out[1], out[2])
+        return self._schemas[name]
 
     async def drop(self, name: str) -> bool:
         try:

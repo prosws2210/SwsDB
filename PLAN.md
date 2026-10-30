@@ -53,7 +53,6 @@ Decisions made while building (beyond the ADRs):
   request on Windows and macOS. That is not swsdb's latency.
 
 Known gaps (tracked):
-- Cypher pass-through returns lists and maps as text (FalkorDB's verbose reply format). Decode the compact format.
 - Reconciliation covers document collections; raw vector/graph collections have no catalog to compare with.
 - Postgres shows every role the names (not contents) of other tenants' tables in `pg_catalog`.
 - Ingestion on CPU is embedding-bound (about 11 passages a second with the bundled model on a laptop). Use an embeddings

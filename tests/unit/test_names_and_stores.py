@@ -5,7 +5,7 @@ import uuid
 import pytest
 
 from swsdb_server.names import NameError_, check, engine_name, parse_engine_name, point_id
-from swsdb_server.stores import StoreError, _qdrant_filter, _value, cypher_literal
+from swsdb_server.stores import StoreError, _qdrant_filter, _StaleSchema, _typed, cypher_literal
 
 
 @pytest.mark.parametrize("ok", ["docs", "a", "support-docs", "v2_kb", "x" * 63, "0day"])
@@ -66,9 +66,21 @@ def test_filters():
         _qdrant_filter({"x": {"$gt": 1}})
 
 
-def test_graph_values_are_decoded():
-    node = [["id", 0], ["labels", [b"Note"]], ["properties", [["body", b"kept"], ["n", 1]]]]
-    assert _value(node) == {"id": 0, "labels": ["Note"], "properties": {"body": "kept", "n": 1}}
-    edge = [["id", 3], ["type", b"LINKS"], ["src_node", 0], ["dest_node", 1], ["properties", []]]
-    assert _value(edge) == {"id": 3, "properties": {}, "type": "LINKS", "src": 0, "dst": 1}
-    assert _value([b"a", 1]) == ["a", 1]
+def test_graph_values_are_decoded_with_their_types():
+    # a compact reply from FalkorDB 4.22: MATCH p=(a)-[e]->(c) RETURN a, e, c, p, [1,2.5,"z"], {k:[1,2], b:false}, ...
+    schema = (["A", "B", "C"], ["R"], ["n", "s", "f", "t", "l", "m", "w"])
+    node_a = [8, [0, [0, 1], [[0, 3, 1], [1, 2, b"x"], [2, 5, b"1.5"], [3, 4, b"true"], [4, 6, [[3, 1], [2, b"a"]]]]]]
+    edge = [7, [0, 0, 0, 1, [[6, 3, 2]]]]
+    node_c = [8, [1, [2], [[5, 3, 3]]]]
+    a = {"id": 0, "labels": ["A", "B"], "properties": {"n": 1, "s": "x", "f": 1.5, "t": True, "l": [1, "a"]}}
+    e = {"id": 0, "type": "R", "src": 0, "dst": 1, "properties": {"w": 2}}
+    assert _typed(node_a, schema) == a
+    assert _typed(edge, schema) == e
+    assert _typed([9, [[6, [node_a, node_c]], [6, [edge]]]], schema)["edges"] == [e]
+    assert _typed([6, [[3, 1], [5, b"2.5"], [2, b"z"]]], schema) == [1, 2.5, "z"]
+    assert _typed([10, [b"k", [6, [[3, 1], [3, 2]]], b"b", [4, b"false"]]], schema) == {"k": [1, 2], "b": False}
+    assert _typed([1, None], schema) is None
+    assert _typed([11, [b"1.5", b"2.5"]], schema) == {"latitude": 1.5, "longitude": 2.5}
+    assert _typed([12, [b"1", b"2"]], schema) == [1.0, 2.0]
+    with pytest.raises(_StaleSchema):  # a label created after the schema was read: re-read it
+        _typed([8, [5, [7], []]], schema)

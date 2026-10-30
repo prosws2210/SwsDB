@@ -69,6 +69,13 @@ def test_graph_with_parameters(box):
     e = err(lambda: kb.cypher("CREATE (:Doc {title: 'x'})", read_only=True))
     assert e.status == 400  # writes are refused in read-only mode
     assert err(lambda: kb.cypher("MATCH (n RETURN n")).status == 400
+    # lists, maps, numbers and booleans come back with their types, not as text
+    typed = kb.cypher("RETURN [1, 2.5, 'z'], {k: [1, 2], b: false}, 1.5, true, null", read_only=True)["rows"][0]
+    assert typed == [[1, 2.5, "z"], {"k": [1, 2], "b": False}, 1.5, True, None]
+    path = kb.cypher("CREATE (:P {n: 1})-[:L {w: 2}]->(:P {n: 2})")
+    assert path["columns"] == []
+    p = kb.cypher("MATCH p=(:P)-[:L]->(:P) RETURN p", read_only=True)["rows"][0][0]
+    assert [n["properties"]["n"] for n in p["nodes"]] == [1, 2] and p["edges"][0]["type"] == "L"
 
 
 def test_sql_is_sandboxed(box):
