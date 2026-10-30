@@ -37,15 +37,15 @@ def free_port() -> int:
 class Box:
     """One swsdb container on a named volume."""
 
-    def __init__(self, volume: str, env: dict[str, str] | None = None):
-        self.volume, self.env = volume, env or {}
+    def __init__(self, volume: str, env: dict[str, str] | None = None, extra: list[str] | None = None):
+        self.volume, self.env, self.extra = volume, env or {}, extra or []
         self.name = f"swsdb-test-{uuid.uuid4().hex[:8]}"
         self.port = free_port()
 
     def start(self) -> Box:
         envs = [a for k, v in self.env.items() for a in ("-e", f"{k}={v}")]
         sh("docker", "run", "-d", "--name", self.name, "-p", f"127.0.0.1:{self.port}:6464",
-           "-v", f"{self.volume}:/swsdb/data", *envs, IMAGE)
+           "-v", f"{self.volume}:/swsdb/data", *envs, *self.extra, IMAGE)
         return self
 
     def get(self, path: str, key: str | None = None) -> tuple[int, dict]:

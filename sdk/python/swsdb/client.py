@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
+import time
 from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -78,8 +81,10 @@ class SwsDB:
         return Collection(self, name)
 
     def create_collection(self, name: str, vector_size: int | None = None, distance: str = "cosine",
-                          graph: bool | None = None) -> Collection:
-        body: dict[str, Any] = {"graph": graph}
+                          graph: bool | None = None, documents: bool = False) -> Collection:
+        """`documents=True`: swsdb chunks, embeds (dense + BM25) and graphs what you add. `vector_size`: raw vectors
+        you embed yourself. `graph`: also a graph (default: yes when the server has the graph engine)."""
+        body: dict[str, Any] = {"graph": graph, "documents": documents}
         if vector_size is not None:
             body["vector"] = {"size": vector_size, "distance": distance}
         self._call("PUT", f"/v1/collections/{name}", body)
@@ -145,3 +150,62 @@ class Collection:
         return self.db._call("POST", f"/v1/collections/{self.name}/cypher",
                              {"query": query, "params": dict(params) if params else None, "read_only": read_only,
                               "timeout_s": timeout_s})
+
+    # -- documents (collections created with documents=True)
+
+    def add_text(self, id: str, text: str, *, title: str | None = None, metadata: Mapping[str, Any] | None = None,
+                 readers: Sequence[str] | None = None, format: str = "markdown") -> dict:
+        """Queue a document given as text ("markdown", "text" or "html"). Returns its status (usually "queued")."""
+        body = {"id": id, "text": text, "title": title, "format": format,
+                "metadata": dict(metadata) if metadata else None, "readers": list(readers) if readers else None}
+        return self.db._call("POST", f"/v1/collections/{self.name}/documents/text", body)
+
+    def upload(self, path: str | Path, *, id: str | None = None, title: str | None = None,
+               metadata: Mapping[str, Any] | None = None, readers: Sequence[str] | None = None) -> dict:
+        """Queue a file (PDF, Markdown, HTML, text). The document id defaults to the file name."""
+        p = Path(path)
+        data: dict[str, str] = {"id": id or p.name}
+        if title:
+            data["title"] = title
+        if metadata:
+            data["metadata"] = json.dumps(dict(metadata))
+        if readers:
+            data["readers"] = json.dumps(list(readers))
+        with p.open("rb") as f:
+            r = self.db._http.post(f"/v1/collections/{self.name}/documents", files={"file": (p.name, f)}, data=data)
+        if r.status_code >= 400:
+            body = r.json()
+            raise SwsDBError(r.status_code, body.get("error", "error"), body.get("message", r.text))
+        return r.json()
+
+    def document(self, id: str) -> dict:
+        return self.db._call("GET", f"/v1/collections/{self.name}/documents/{id}")
+
+    def documents(self, limit: int = 100, offset: int = 0, status: str | None = None) -> dict:
+        q = f"?limit={limit}&offset={offset}" + (f"&status={status}" if status else "")
+        return self.db._call("GET", f"/v1/collections/{self.name}/documents{q}")
+
+    def delete_document(self, id: str) -> dict:
+        return self.db._call("DELETE", f"/v1/collections/{self.name}/documents/{id}")
+
+    def wait_ready(self, id: str, timeout: float = 600, poll: float = 0.5) -> dict:
+        """Block until a document is searchable. Raises SwsDBError if its processing failed."""
+        deadline = time.monotonic() + timeout
+        while True:
+            d = self.document(id)
+            if d["status"] == "ready":
+                return d
+            if d["status"] == "failed":
+                raise SwsDBError(422, "document_failed", f"{id}: {d['error']}")
+            if time.monotonic() > deadline:
+                raise SwsDBError(408, "timeout", f"{id} still {d['status']} after {timeout}s")
+            time.sleep(poll)
+
+    def query(self, query: str, k: int = 10, *, mode: str = "hybrid", where: Mapping[str, Any] | None = None,
+              principals: Sequence[str] | None = None, graph_hops: int | None = None, graph_k: int = 5) -> list[dict]:
+        """Hybrid retrieval over the documents: the top `k` hits, then up to `graph_k` connected chunks
+        (via="graph", with graph_path). `principals` (admin key only) is who is asking, e.g. ["user:42"]."""
+        body = {"query": query, "k": k, "mode": mode, "where": dict(where) if where else None,
+                "principals": list(principals) if principals is not None else None, "graph_hops": graph_hops,
+                "graph_k": graph_k}
+        return self.db._call("POST", f"/v1/collections/{self.name}/query", body)["hits"]

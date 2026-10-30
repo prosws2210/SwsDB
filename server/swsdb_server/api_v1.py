@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
+from .documents import Documents
 from .names import DEFAULT_TENANT, NameError_, check, engine_name
 from .stores import GraphStore, NotFound, SqlStore, VectorSpec, VectorStore
 
@@ -22,7 +24,8 @@ class VectorConfig(BaseModel):
 
 
 class CreateCollection(BaseModel):
-    vector: VectorConfig | None = None
+    vector: VectorConfig | None = None  # raw vectors you embed yourself
+    documents: bool = False  # documents swsdb chunks and embeds (dense + BM25), with optional entity graph
     graph: bool | None = None  # default: yes when the graph engine is enabled
 
 
@@ -52,6 +55,25 @@ class Cypher(BaseModel):
     params: dict[str, Any] | None = None
     read_only: bool = False
     timeout_s: float = Field(30, gt=0, le=600)
+
+
+class TextDocument(BaseModel):
+    id: str = Field(min_length=1, max_length=512)
+    text: str = Field(min_length=1)
+    format: Literal["markdown", "text", "html"] = "markdown"
+    title: str | None = Field(None, max_length=1000)
+    metadata: dict[str, Any] | None = None
+    readers: list[str] | None = None
+
+
+class Query(BaseModel):
+    query: str = Field(min_length=1, max_length=10_000)
+    k: int = Field(10, ge=1, le=200)
+    mode: Literal["hybrid", "dense", "sparse"] = "hybrid"
+    where: dict[str, Any] | None = None  # metadata fields (exact match; lists mean any of); "document" for ids
+    principals: list[str] | None = None  # who is asking, e.g. ["user:42", "group:support"] (admin key only)
+    graph_hops: int | None = Field(None, ge=0, le=2)  # default: 1 when the collection has a graph
+    graph_k: int = Field(5, ge=0, le=50)  # connected chunks added after the k search hits
 
 
 class Sql(BaseModel):
@@ -118,6 +140,15 @@ class Engines:
     def has(self, cap: str) -> bool:
         return cap in self.s.engines
 
+    @property
+    def docs(self) -> Documents:
+        self.need("sql")
+        self.need("vector")
+        d = self.app.state.docs
+        if d is None:
+            raise HTTPException(503, "document processing is starting")
+        return d
+
 
 def router(require_key) -> APIRouter:
     r = APIRouter(prefix="/v1")
@@ -139,8 +170,16 @@ def router(require_key) -> APIRouter:
     async def create_collection(body: CreateCollection, name: str = Depends(collection_name),
                                 t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(admin)):
         want_graph = body.graph if body.graph is not None else e.has("graph")
+        if body.documents:
+            if body.vector is not None:
+                raise HTTPException(422, "a documents collection embeds for you: leave out `vector`")
+            if want_graph:
+                e.need("graph")
+            await e.docs.create_collection(t, name, graph=want_graph)
+            return await describe(name, t, e)
         if body.vector is None and not want_graph:
-            raise HTTPException(422, "a collection needs vectors (`vector: {size, distance}`), a graph, or both")
+            raise HTTPException(422, "a collection needs vectors (`vector: {size, distance}`), documents, a graph, "
+                                     "or a combination")
         key = engine_name(t, name)
         if body.vector is not None:
             await e.vector.create(key, VectorSpec(body.vector.size, body.vector.distance))
@@ -161,6 +200,12 @@ def router(require_key) -> APIRouter:
         if e.has("graph") and await e.graph.exists(key):
             res = await e.graph.query(key, "MATCH (n) RETURN count(n)", None, read_only=True, timeout_s=10)
             out["graph"] = {"nodes": res["rows"][0][0]}
+        docs = e.app.state.docs
+        if e.has("sql") and docs and await docs.is_document_collection(t, name):
+            coll = await docs.collection(t, name)
+            counts = await docs.list(t, name, 1, 0, None)
+            out["documents"] = {"count": counts["total"], "embedding": coll["embedding"], "dim": coll["dim"],
+                                "graph": coll["graph"]}
         if out["vector"] is None and out["graph"] is None:
             raise NotFound(f"collection {name!r} not found")
         return out
@@ -182,6 +227,8 @@ def router(require_key) -> APIRouter:
                 removed["vector"] = False
         if e.has("graph"):
             removed["graph"] = await e.graph.drop(key)
+        if e.has("sql") and e.app.state.docs:
+            removed["documents"] = await e.app.state.docs.drop_collection(t, name)
         if not any(removed.values()):
             raise NotFound(f"collection {name!r} not found")
         return {"deleted": name, **removed}
@@ -223,6 +270,61 @@ def router(require_key) -> APIRouter:
         if not await g.exists(key):
             raise NotFound(f"collection {name!r} has no graph (create it with graph: true)")
         return await g.query(key, body.query, body.params, read_only=body.read_only, timeout_s=body.timeout_s)
+
+    # -------------------------------------------------------------- documents
+
+    @r.post("/collections/{name}/documents", tags=["documents"], status_code=202)
+    async def upload(file: UploadFile = File(...), id: str | None = Form(None), title: str | None = Form(None),
+                     metadata: str | None = Form(None), readers: str | None = Form(None),
+                     name: str = Depends(collection_name), t: str = Depends(tenant), e: Engines = Depends(),
+                     _: str = Depends(admin)):
+        """Upload a file (PDF, Markdown, HTML, text). `metadata` and `readers` are JSON (an object and a list)."""
+        try:
+            meta = json.loads(metadata) if metadata else None
+            who = json.loads(readers) if readers else None
+        except json.JSONDecodeError as err:
+            raise HTTPException(422, f"metadata and readers must be JSON: {err}") from None
+        data = await file.read()
+        return await e.docs.submit(t, name, id or file.filename or "document", data, file.filename or "document.txt",
+                                   title, meta, who)
+
+    @r.post("/collections/{name}/documents/text", tags=["documents"], status_code=202)
+    async def upload_text(body: TextDocument, name: str = Depends(collection_name), t: str = Depends(tenant),
+                          e: Engines = Depends(), _: str = Depends(admin)):
+        ext = {"markdown": ".md", "text": ".txt", "html": ".html"}[body.format]
+        return await e.docs.submit(t, name, body.id, body.text.encode(), f"document{ext}", body.title,
+                                   body.metadata, body.readers)
+
+    @r.get("/collections/{name}/documents", tags=["documents"])
+    async def list_documents(limit: int = 100, offset: int = 0, status: str | None = None,
+                             name: str = Depends(collection_name), t: str = Depends(tenant), e: Engines = Depends(),
+                             _: str = Depends(admin)):
+        if not 1 <= limit <= 1000 or offset < 0:
+            raise HTTPException(422, "limit must be 1-1000 and offset >= 0")
+        return await e.docs.list(t, name, limit, offset, status)
+
+    @r.get("/collections/{name}/documents/{doc_id:path}", tags=["documents"])
+    async def get_document(doc_id: str, name: str = Depends(collection_name), t: str = Depends(tenant),
+                           e: Engines = Depends(), _: str = Depends(admin)):
+        return await e.docs.get(t, name, doc_id)
+
+    @r.delete("/collections/{name}/documents/{doc_id:path}", tags=["documents"])
+    async def delete_document(doc_id: str, name: str = Depends(collection_name), t: str = Depends(tenant),
+                              e: Engines = Depends(), _: str = Depends(admin)):
+        return await e.docs.delete(t, name, doc_id)
+
+    @r.post("/collections/{name}/query", tags=["documents"])
+    async def query(body: Query, name: str = Depends(collection_name), t: str = Depends(tenant),
+                    e: Engines = Depends(), role: str = Depends(require_key)):
+        """Hybrid retrieval (dense + BM25, fused) with optional graph expansion, filtered by who is asking."""
+        if body.principals is not None and role != "admin":
+            raise HTTPException(403, "only the admin key may act for principals; a read-only key sees public "
+                                     "documents only")
+        if body.graph_hops and not e.has("graph"):
+            raise HTTPException(409, "graph_hops needs the graph engine")
+        return await e.docs.query(t, name, body.query, k=body.k, mode=body.mode, where=body.where,
+                                  principals=body.principals, role=role, graph_hops=body.graph_hops,
+                                  graph_k=body.graph_k)
 
     # -------------------------------------------------------------- SQL
 

@@ -116,7 +116,7 @@ def test_read_only_key(box):
 def test_delete_collection(box):
     d = db(box)
     d.create_collection("temp", vector_size=2, graph=True)
-    assert d.delete_collection("temp") == {"deleted": "temp", "vector": True, "graph": True}
+    assert d.delete_collection("temp") == {"deleted": "temp", "vector": True, "graph": True, "documents": False}
     assert err(lambda: d.collection("temp").info()).status == 404
 
 

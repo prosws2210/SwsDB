@@ -18,6 +18,8 @@ COPY server/ /tmp/server/
 COPY sdk/python/ /tmp/sdk/
 RUN /opt/swsdb/venv/bin/pip install --no-deps /tmp/server /tmp/sdk \
  && find /opt/swsdb/venv -name '__pycache__' -prune -exec rm -rf {} +
+# The default embedding models, baked in so swsdb works offline with no key
+RUN /opt/swsdb/venv/bin/python -c "from fastembed import TextEmbedding, SparseTextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5', cache_dir='/opt/swsdb/models'); SparseTextEmbedding('Qdrant/bm25', cache_dir='/opt/swsdb/models')"  && find /opt/swsdb/models -name '*.lock' -delete
 
 # ------------------------------------------------------------------ runtime
 FROM ${PYTHON_IMAGE}
@@ -68,6 +70,7 @@ RUN set -eux; \
     ln -s /opt/swsdb/engines/falkordb/redis-cli /usr/local/bin/redis-cli
 
 COPY --from=server /opt/swsdb/venv /opt/swsdb/venv
+COPY --from=server /opt/swsdb/models /opt/swsdb/models
 COPY docker/rootfs/ /
 COPY LICENSE /opt/swsdb/licenses/swsdb.LICENSE
 
@@ -75,6 +78,7 @@ COPY LICENSE /opt/swsdb/licenses/swsdb.LICENSE
 RUN set -eux; \
     find /etc/s6-overlay/s6-rc.d /opt/swsdb/bin -type f -exec sed -i 's/\r$//' {} +; \
     chmod 0755 /opt/swsdb/bin/* /etc/s6-overlay/s6-rc.d/*/run /etc/s6-overlay/s6-rc.d/*/finish; \
+    chmod -R a+rX /opt/swsdb/models; \
     useradd --system --uid 10001 --user-group --home-dir /swsdb --no-create-home --shell /usr/sbin/nologin swsdb; \
     install -d -o swsdb -g swsdb -m 0750 /swsdb /swsdb/data; \
     ln -s /opt/swsdb/venv/bin/swsdb-admin /usr/local/bin/swsdb-admin; \
@@ -83,6 +87,8 @@ RUN set -eux; \
 ENV PATH="/opt/swsdb/venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    HF_HUB_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
     SWSDB_PG_MAJOR=${PG_MAJOR} \
     S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
     S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0 \

@@ -26,6 +26,35 @@ class Settings(BaseSettings):
     # how long /readyz waits for an engine on start before calling it failed rather than starting
     engine_start_timeout_s: float = 120.0
 
+    # documents: embeddings (dense model; sparse BM25 is always local) and optional entity extraction
+    embeddings: str = "local"  # local | openai (any OpenAI-compatible /embeddings endpoint)
+    embeddings_model: str | None = None
+    embeddings_url: str | None = None
+    embeddings_api_key: SecretStr | None = None
+    llm_url: str | None = None  # OpenAI-compatible base URL, e.g. https://api.openai.com/v1 or http://ollama:11434/v1
+    llm_model: str | None = None  # unset: no entity extraction (the graph still holds document structure)
+    llm_api_key: SecretStr | None = None
+    models_dir: Path = Path("/opt/swsdb/models")
+    ingest_workers: int = Field(2, ge=1, le=32)
+    max_upload_mb: int = Field(100, ge=1, le=4096)
+
+    @field_validator("embeddings_api_key", "llm_api_key", mode="before")
+    @classmethod
+    def _blank_secret(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("embeddings")
+    @classmethod
+    def _provider(cls, v: str) -> str:
+        v = v.lower()
+        if v not in {"local", "openai"}:
+            raise ValueError("SWSDB_EMBEDDINGS must be 'local' or 'openai' (any OpenAI-compatible endpoint)")
+        return v
+
+    @property
+    def files_dir(self) -> Path:
+        return self.data_dir / "files"
+
     @field_validator("api_key", "read_only_api_key", mode="before")
     @classmethod
     def _blank_is_unset(cls, v: object) -> object:

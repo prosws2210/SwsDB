@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import time
@@ -13,6 +14,9 @@ from fastapi.responses import JSONResponse
 
 from . import DATA_FORMAT, __version__
 from .api_v1 import router as v1_router
+from .documents import Documents
+from .embed import Embedder
+from .extract import Extractor
 from .health import Monitor, read_secrets
 from .names import NameError_
 from .settings import Settings
@@ -33,6 +37,25 @@ def _key_from(request: Request) -> str | None:
 
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": ERROR_CODES.get(status, "error"), "message": message}, status_code=status)
+
+
+async def _start_documents(app: FastAPI) -> None:
+    """Documents need Postgres and Qdrant: wait until both answer, then resume unfinished ingestion."""
+    s: Settings = app.state.settings
+    while not all(app.state.monitor.status[c].state == "ready" for c in ("sql", "vector")):  # noqa: ASYNC110 - polls the monitor
+        await asyncio.sleep(0.5)
+    embedder = Embedder(s.embeddings, s.embeddings_model, s.embeddings_url,
+                        s.embeddings_api_key.get_secret_value() if s.embeddings_api_key else None,
+                        cache_dir=str(s.models_dir))
+    extractor = None
+    if s.llm_model and "graph" in s.engines:
+        extractor = Extractor(s.llm_url or "https://api.openai.com/v1", s.llm_model,
+                              s.llm_api_key.get_secret_value() if s.llm_api_key else None)
+        log.info("entity extraction with %s", s.llm_model)
+    docs = Documents(s, app.state.sql, app.state.vector, app.state.graph, embedder, extractor)
+    await docs.start()
+    app.state.docs = docs
+    log.info("documents ready (embeddings %s)", embedder.name)
 
 
 def create_app(settings: Settings | None = None, monitor: Monitor | None = None, stores: dict | None = None) -> FastAPI:
@@ -57,7 +80,17 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
             if "graph" in s.engines:
                 app.state.graph = GraphStore("127.0.0.1", 6379, secret["falkordb_password"])
                 made.append(app.state.graph)
+        starter = None
+        if app.state.sql is not None and app.state.vector is not None and app.state.docs is None:
+            starter = asyncio.create_task(_start_documents(app), name="swsdb-documents-start")
         yield
+        if starter:
+            starter.cancel()
+        if app.state.docs is not None:
+            await app.state.docs.stop()
+            await app.state.docs.embedder.close()
+            if app.state.docs.extractor:
+                await app.state.docs.extractor.close()
         for st in made:
             await st.close()
         if owned:
@@ -66,7 +99,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     app = FastAPI(title="swsdb", version=__version__, lifespan=lifespan, docs_url="/docs", redoc_url=None)
     app.state.settings = s
     app.state.monitor = monitor
-    app.state.sql = app.state.vector = app.state.graph = None
+    app.state.sql = app.state.vector = app.state.graph = app.state.docs = None
     for k, v in (stores or {}).items():
         setattr(app.state, k, v)
 

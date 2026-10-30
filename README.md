@@ -2,11 +2,12 @@
 
 **One database for AI applications: relational, vector and graph in a single Docker container.**
 
-> **Status: early development (Phases 0–2 of [PLAN.md](PLAN.md) done).** Working today: PostgreSQL 17, Qdrant 1.19
-> and FalkorDB 4.22 in one supervised image; a REST API for collections, vectors, graph (Cypher) and SQL; tenants;
-> admin and read-only API keys; a Python SDK and `swsdb` CLI; tested crash recovery and durability. Document
-> ingestion, hybrid retrieval, consistency guarantees and the console are next; sections marked *(planned)* describe
-> them. No image is published yet: build it from source (below).
+> **Status: early development (Phases 0–3 of [PLAN.md](PLAN.md) done).** Working today: PostgreSQL 17, Qdrant 1.19
+> and FalkorDB 4.22 in one supervised image; document ingestion (PDF, Markdown, HTML, text) with hybrid retrieval
+> (dense + BM25) and graph expansion; permissions per document; a REST API for collections, vectors, graph (Cypher)
+> and SQL; tenants; admin and read-only API keys; a Python SDK and `swsdb` CLI; tested crash recovery and durability.
+> Cross-store consistency guarantees, evaluation and the console are next; sections marked *(planned)* describe them.
+> No image is published yet: build it from source (below).
 
 ## Try it now (from source)
 
@@ -21,7 +22,28 @@ docker exec swsdb swsdb-admin status
 docker exec swsdb swsdb-admin credentials   # native connection strings for psql, Qdrant clients, Cypher
 ```
 
-Use it from Python (`pip install ./sdk/python`; on PyPI later):
+Ingest documents and ask questions (Python, `pip install ./sdk/python`; on PyPI later):
+
+```python
+from swsdb import SwsDB
+
+db = SwsDB("http://localhost:6464", tenant="acme")
+kb = db.create_collection("handbook", documents=True)      # chunked, embedded (offline model) and graphed for you
+
+kb.upload("employee-handbook.pdf", readers=["group:staff"])
+kb.add_text("refunds", "# Refunds\n\nRefunds are issued within five business days.", metadata={"team": "support"})
+kb.wait_ready("employee-handbook.pdf")
+
+for hit in kb.query("how long do refunds take?", k=5, principals=["user:42", "group:staff"]):
+    print(hit["score"], hit["via"], hit["document"], hit["page"], hit["heading"], hit["text"][:80])
+```
+
+Each hit cites its document, page and heading. `via` says how it was found (`hybrid` search, or `graph` with a
+`graph_path` such as "mentions Maria Lopez"). Set `SWSDB_LLM_URL` and `SWSDB_LLM_MODEL` (any OpenAI-compatible
+model) to also extract entities, so questions can hop between documents that mention the same people, products or
+projects.
+
+Lower level, with vectors you embed yourself:
 
 ```python
 from swsdb import SwsDB
@@ -48,7 +70,8 @@ curl -X POST localhost:6464/v1/collections/docs/search -H 'content-type: applica
 ```
 
 Measured on a laptop (Docker Desktop, 12 CPUs): ready **9.7 s** after a cold start on an empty volume, **166 MB**
-idle memory with all three engines, image **246 MB**.
+idle memory with all three engines (the embedding model loads on first use), image **369 MB** including
+the offline embedding models. A generated 200-page PDF is ingested in **12.6 s** and cited by page.
 
 AI applications need three kinds of storage at once: a **relational** store for users, permissions and documents, a
 **vector** store for semantic search, and a **graph** store for entities and how they relate. Today that means running
@@ -131,8 +154,10 @@ db.cypher("MATCH (p:Product)-[:MENTIONED_IN]->(d:Document) RETURN p.name, count(
 ## Configuration
 
 Environment variables cover the common cases; mount a `swsdb.yaml` for the rest *(planned)*. Working today:
-`SWSDB_ENGINES`, `SWSDB_API_KEY`, `SWSDB_READ_ONLY_API_KEY`, `SWSDB_EXPOSE_NATIVE` and `SWSDB_LOG_LEVEL`.
-`SWSDB_EMBEDDINGS` and `SWSDB_LLM` arrive with ingestion (Phase 3).
+`SWSDB_ENGINES`, `SWSDB_API_KEY`, `SWSDB_READ_ONLY_API_KEY`, `SWSDB_EXPOSE_NATIVE`, `SWSDB_LOG_LEVEL`,
+`SWSDB_EMBEDDINGS` (`local` or `openai` with `SWSDB_EMBEDDINGS_URL` / `_MODEL` / `_API_KEY` for any OpenAI-compatible
+endpoint), `SWSDB_LLM_URL` / `SWSDB_LLM_MODEL` / `SWSDB_LLM_API_KEY` (entity extraction), `SWSDB_INGEST_WORKERS` and
+`SWSDB_MAX_UPLOAD_MB`.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -140,7 +165,7 @@ Environment variables cover the common cases; mount a `swsdb.yaml` for the rest 
 | `SWSDB_API_KEY` | none | Full-access key; required once the port is reachable by others |
 | `SWSDB_READ_ONLY_API_KEY` | none | Search-only key |
 | `SWSDB_EMBEDDINGS` | `local` | `local`, `openai`, `cohere`, `ollama` or an OpenAI-compatible URL |
-| `SWSDB_LLM` | none | Model used for entity extraction (graph ingestion is off without one) |
+| `SWSDB_LLM_URL`, `SWSDB_LLM_MODEL` | none | OpenAI-compatible model for entity extraction (without it the graph holds document structure only) |
 | `SWSDB_EXPOSE_NATIVE` | `false` | Also publish the engines' own ports (5432, 6333, 6379) |
 
 | Port | What |

@@ -55,6 +55,33 @@ MIGRATIONS: list[str] = [
     ALTER SCHEMA public OWNER TO swsdb_app;
     GRANT USAGE, CREATE ON SCHEMA public TO swsdb_app;
     """,
+    # 2: the document catalog. Postgres is the source of truth: vectors and graph can be rebuilt from these rows.
+    """
+    CREATE TABLE swsdb.collections (
+      tenant text NOT NULL, name text NOT NULL,
+      embedding text NOT NULL, dim int NOT NULL, graph boolean NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant, name));
+    CREATE TABLE swsdb.documents (
+      id uuid PRIMARY KEY, tenant text NOT NULL, collection text NOT NULL, external_id text NOT NULL,
+      title text, filename text, kind text, metadata jsonb NOT NULL DEFAULT '{}', readers text[] NOT NULL,
+      version int NOT NULL DEFAULT 1, status text NOT NULL, error text,
+      chunks int NOT NULL DEFAULT 0, entities int NOT NULL DEFAULT 0, bytes bigint, sha256 text,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+      FOREIGN KEY (tenant, collection) REFERENCES swsdb.collections ON DELETE CASCADE,
+      UNIQUE (tenant, collection, external_id));
+    CREATE INDEX documents_pending ON swsdb.documents (updated_at) WHERE status IN ('queued', 'processing');
+    CREATE TABLE swsdb.chunks (
+      id uuid PRIMARY KEY, document_id uuid NOT NULL REFERENCES swsdb.documents ON DELETE CASCADE,
+      version int NOT NULL, ordinal int NOT NULL, text text NOT NULL, page int, heading text, hash text NOT NULL,
+      UNIQUE (document_id, version, ordinal));
+    CREATE TABLE swsdb.chunk_entities (
+      chunk_id uuid NOT NULL REFERENCES swsdb.chunks ON DELETE CASCADE,
+      entity_key text NOT NULL, name text NOT NULL, type text NOT NULL, PRIMARY KEY (chunk_id, entity_key));
+    CREATE TABLE swsdb.chunk_relations (
+      chunk_id uuid NOT NULL REFERENCES swsdb.chunks ON DELETE CASCADE,
+      source text NOT NULL, target text NOT NULL, type text NOT NULL, PRIMARY KEY (chunk_id, source, target, type));
+    """,
 ]
 
 
@@ -211,9 +238,15 @@ class VectorStore:
 
     async def info(self, name: str) -> dict:
         r = (await self._call("GET", f"/collections/{name}"))["result"]
-        v = r["config"]["params"]["vectors"]
+        params = r["config"]["params"]
+        v = params["vectors"]
+        if "size" not in v and "dense" in v:  # a documents collection: named dense + sparse vectors
+            v = {**v["dense"], "sparse": list(params.get("sparse_vectors") or {})}
         dist = {q: k for k, q in DISTANCES.items()}.get(v.get("distance"), v.get("distance"))
-        return {"size": v.get("size"), "distance": dist, "points": r.get("points_count"), "status": r.get("status")}
+        out = {"size": v.get("size"), "distance": dist, "points": r.get("points_count"), "status": r.get("status")}
+        if v.get("sparse"):
+            out["sparse"] = v["sparse"]
+        return out
 
     async def drop(self, name: str) -> bool:
         return bool((await self._call("DELETE", f"/collections/{name}"))["result"])
@@ -255,6 +288,42 @@ class VectorStore:
     async def delete(self, name: str, ids: list[str | int]) -> None:
         await self._call("POST", f"/collections/{name}/points/delete", params={"wait": "true"},
                          json={"points": [point_id(i) for i in ids]})
+
+    # -- document collections: named dense + sparse (BM25) vectors, chunks invisible until their document is ready
+
+    async def create_documents(self, name: str, dim: int) -> None:
+        await self._call("PUT", f"/collections/{name}", json={
+            "vectors": {"dense": {"size": dim, "distance": "Cosine"}},
+            "sparse_vectors": {"sparse": {"modifier": "idf"}},
+            "on_disk_payload": True})
+        for field, schema in (("document_id", "keyword"), ("readers", "keyword"), ("live", "bool"),
+                              ("version", "integer")):
+            await self._call("PUT", f"/collections/{name}/index", params={"wait": "true"},
+                             json={"field_name": field, "field_schema": schema})
+
+    async def is_documents(self, name: str) -> bool:
+        r = (await self._call("GET", f"/collections/{name}"))["result"]["config"]["params"]
+        return isinstance(r.get("vectors"), dict) and "dense" in r["vectors"] and "sparse" in (r.get("sparse_vectors")
+                                                                                             or {})
+
+    async def upsert_chunks(self, name: str, points: list[dict]) -> None:
+        for i in range(0, len(points), 256):
+            await self._call("PUT", f"/collections/{name}/points", params={"wait": "true"},
+                             json={"points": points[i:i + 256]})
+
+    async def set_payload(self, name: str, payload: dict, flt: dict) -> None:
+        await self._call("POST", f"/collections/{name}/points/payload", params={"wait": "true"},
+                         json={"payload": payload, "filter": flt})
+
+    async def delete_where(self, name: str, flt: dict) -> None:
+        await self._call("POST", f"/collections/{name}/points/delete", params={"wait": "true"}, json={"filter": flt})
+
+    async def query(self, name: str, body: dict) -> list[dict]:
+        return (await self._call("POST", f"/collections/{name}/points/query", json=body))["result"]["points"]
+
+    async def scroll(self, name: str, flt: dict, limit: int) -> list[dict]:
+        body = {"filter": flt, "limit": limit, "with_payload": True, "with_vector": False}
+        return (await self._call("POST", f"/collections/{name}/points/scroll", json=body))["result"]["points"]
 
 
 # ------------------------------------------------------------------ graph (FalkorDB)
