@@ -7,3 +7,4 @@ tests
 docs
 *.md
 !server/README.md
+!sdk/python/README.md

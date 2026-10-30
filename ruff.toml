@@ -7,3 +7,10 @@ ignore = ["S101", "S603", "S607", "S104"]
 
 [lint.isort]
 known-first-party = ["swsdb_server"]
+
+[lint.per-file-ignores]
+# benchmarks build queries from integers and use a seeded RNG on purpose
+"benchmarks/**" = ["S311", "S608"]
+# FastAPI dependencies are declared as argument defaults by design
+"server/swsdb_server/api_v1.py" = ["B008"]
+"server/swsdb_server/app.py" = ["B008"]

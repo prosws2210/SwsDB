@@ -14,6 +14,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "psycopg[binary]>=3.2,<4",
     "redis>=5.2,<7",
+    "psycopg-pool>=3.2,<4",
 ]
 
 [project.scripts]
@@ -21,7 +22,12 @@ swsdb-server = "swsdb_server.__main__:main"
 swsdb-admin = "swsdb_server.admin:main"
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.8"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "swsdb",
+]
 
 [build-system]
 requires = ["hatchling>=1.26"]
@@ -32,3 +38,6 @@ path = "swsdb_server/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["swsdb_server"]
+
+[tool.uv.sources]
+swsdb = { path = "../sdk/python", editable = true }

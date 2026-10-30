@@ -221,3 +221,33 @@ def test_data_from_a_newer_swsdb_is_refused(volume, boxes):
     while time.time() < deadline and "running" in sh("docker", "inspect", "-f", "{{.State.Status}}", b.name):
         time.sleep(0.5)
     assert "newer than this image" in b.logs()
+
+
+def wait_exited(b: Box, timeout: float = 60) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline and "running" in sh("docker", "inspect", "-f", "{{.State.Status}}", b.name):
+        time.sleep(0.5)
+
+
+def test_a_hard_kill_leaves_nothing_that_blocks_the_next_start(volume, boxes):
+    b = Box(volume).start()
+    boxes.append(b)
+    b.wait_ready()
+    write_one_of_each(b)
+    sh("docker", "kill", "-s", "KILL", b.name)  # no shutdown at all: like a host crash
+    b.remove()
+    b2 = Box(volume).start()  # the stale postmaster.pid's PID may belong to another process here
+    boxes.append(b2)
+    b2.wait_ready()
+    assert_one_of_each(b2)
+
+
+def test_a_second_container_on_the_same_volume_is_refused(volume, boxes):
+    b = Box(volume).start()
+    boxes.append(b)
+    b.wait_ready()
+    b2 = Box(volume).start()
+    boxes.append(b2)
+    wait_exited(b2)
+    assert "already used by another running swsdb container" in b2.logs()
+    assert b.get("/readyz")[0] == 200  # the first one is untouched

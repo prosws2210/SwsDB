@@ -2,10 +2,11 @@
 
 **One database for AI applications: relational, vector and graph in a single Docker container.**
 
-> **Status: early development (Phases 0–1 of [PLAN.md](PLAN.md)).** The container works today: PostgreSQL 17,
-> Qdrant 1.19 and FalkorDB 4.22 in one image, supervised, with health and status endpoints, engine selection, API keys
-> and tested crash recovery. Ingestion, retrieval, the SDK and the console are next; sections marked *(planned)* below
-> describe them. No image is published yet: build it from source (below).
+> **Status: early development (Phases 0–2 of [PLAN.md](PLAN.md) done).** Working today: PostgreSQL 17, Qdrant 1.19
+> and FalkorDB 4.22 in one supervised image; a REST API for collections, vectors, graph (Cypher) and SQL; tenants;
+> admin and read-only API keys; a Python SDK and `swsdb` CLI; tested crash recovery and durability. Document
+> ingestion, hybrid retrieval, consistency guarantees and the console are next; sections marked *(planned)* describe
+> them. No image is published yet: build it from source (below).
 
 ## Try it now (from source)
 
@@ -18,6 +19,32 @@ curl http://localhost:6464/readyz        # {"status":"ready","engines":{"sql":�
 curl http://localhost:6464/v1/status     # versions, state and latency of each engine
 docker exec swsdb swsdb-admin status
 docker exec swsdb swsdb-admin credentials   # native connection strings for psql, Qdrant clients, Cypher
+```
+
+Use it from Python (`pip install ./sdk/python`; on PyPI later):
+
+```python
+from swsdb import SwsDB
+
+db = SwsDB("http://localhost:6464", tenant="acme")        # api_key=... once SWSDB_API_KEY is set
+
+docs = db.create_collection("docs", vector_size=3)          # vectors + a graph
+docs.upsert([{"id": "handbook#1", "vector": [1, 0, 0], "payload": {"team": "support"}}])
+docs.search([1, 0, 0], limit=5, where={"team": "support"})  # [{"id": "handbook#1", "score": 1.0, ...}]
+
+docs.cypher("CREATE (:Doc {title: $t})", {"t": "Refund policy"})
+docs.cypher("MATCH (d:Doc) RETURN d.title", read_only=True)
+
+db.sql("CREATE TABLE notes (id int PRIMARY KEY, body text)")
+db.sql("SELECT * FROM notes WHERE id = %s", [1], read_only=True)
+```
+
+or the HTTP API directly (interactive docs at `http://localhost:6464/docs`):
+
+```bash
+curl -X PUT localhost:6464/v1/collections/docs -H 'content-type: application/json' -d '{"vector": {"size": 3}}'
+curl -X POST localhost:6464/v1/collections/docs/search -H 'content-type: application/json' \
+     -d '{"vector": [1, 0, 0], "limit": 5}'
 ```
 
 Measured on a laptop (Docker Desktop, 12 CPUs): ready **9.7 s** after a cold start on an empty volume, **166 MB**

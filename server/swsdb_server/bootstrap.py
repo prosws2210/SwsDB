@@ -14,6 +14,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from . import DATA_FORMAT, __version__
@@ -54,14 +55,19 @@ def render_pg_conf(s: Settings) -> str:
 def render_pg_hba(s: Settings) -> str:
     lines = [
         "# Written by swsdb on every start.",
-        "# swsdb itself connects over the Unix socket as the OS user that owns the cluster.",
-        "local   all   all                 peer",
+        "# Over the Unix socket the OS user swsdb may log in as swsdb (superuser) or swsdb_app (pass-through SQL).",
+        "local   all   all                 peer map=swsdb",
         "host    all   all   127.0.0.1/32  scram-sha-256",
         "host    all   all   ::1/128       scram-sha-256",
     ]
     if s.expose_native:
         lines += ["host    all   all   0.0.0.0/0     scram-sha-256", "host    all   all   ::/0          scram-sha-256"]
     return "\n".join(lines) + "\n"
+
+
+def render_pg_ident() -> str:
+    # OS user swsdb may connect as the swsdb superuser (the server's own work) or swsdb_app (pass-through SQL)
+    return "# Written by swsdb on every start.\nswsdb   swsdb   swsdb\nswsdb   swsdb   swsdb_app\n"
 
 
 def render_qdrant_config(s: Settings, secret: dict[str, str]) -> str:
@@ -174,8 +180,37 @@ def _load_secrets(s: Settings, uid: int, gid: int) -> dict[str, str]:
     return data
 
 
+def _wait_for_guard(s: Settings, timeout: float = 20) -> None:
+    """Nothing touches the volume until this container holds its lock (swsdb_server.guard)."""
+    flag = s.run_dir / "guard.ok"
+    deadline = time.monotonic() + timeout
+    while not flag.is_file():
+        if time.monotonic() > deadline:
+            raise BootstrapError("the data-volume lock was not acquired (is another swsdb container using it?)")
+        time.sleep(0.1)
+
+
+def clear_stale_pid(pg_data: Path) -> bool:
+    """A postmaster.pid left by a killed container blocks Postgres forever once its PID is reused in a new container.
+    Safe to remove only because this container holds the volume lock and no Postgres runs in it yet."""
+    pid_file = pg_data / "postmaster.pid"
+    if not pid_file.is_file():
+        return False
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").splitlines()[0])
+        comm = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError, IndexError):
+        comm = ""
+    if comm == "postgres":
+        raise BootstrapError(f"PostgreSQL is already running on {pg_data} (PID {pid})")
+    pid_file.unlink()
+    print("[swsdb] removed a stale postmaster.pid (the previous container did not shut down cleanly)", flush=True)
+    return True
+
+
 def _init_postgres(s: Settings, secret: dict[str, str], uid: int, gid: int) -> None:
     check_pg_major(s.pg_data)
+    clear_stale_pid(s.pg_data)
     if not (s.pg_data / "PG_VERSION").is_file():
         if any(s.pg_data.iterdir()):
             raise BootstrapError(f"{s.pg_data} is not empty but holds no Postgres cluster; refusing to overwrite it")
@@ -199,6 +234,7 @@ def _init_postgres(s: Settings, secret: dict[str, str], uid: int, gid: int) -> N
             f.write(f"\n# swsdb settings (rewritten on every start)\n{include}\n")
     _write(s.run_dir / "postgresql.swsdb.conf", render_pg_conf(s), uid, gid, 0o644)
     _write(s.pg_data / "pg_hba.conf", render_pg_hba(s), uid, gid)
+    _write(s.pg_data / "pg_ident.conf", render_pg_ident(), uid, gid)
     _owner(s.pg_socket_dir, uid, gid, 0o750)
 
 
@@ -211,6 +247,7 @@ def run(s: Settings) -> None:
     pw = pwd.getpwnam(USER)
     uid, gid = pw.pw_uid, pw.pw_gid
 
+    _wait_for_guard(s)
     _owner(s.run_dir, uid, gid, 0o750)
     _owner(s.data_dir, uid, gid, 0o750)
     _owner(s.meta_dir, uid, gid, 0o700)

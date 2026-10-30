@@ -16,7 +16,7 @@ class FakeMonitor(Monitor):
 
 def client(states: dict[str, str], **kw) -> TestClient:
     s = Settings(**kw)
-    return TestClient(create_app(s, FakeMonitor(s, states)))
+    return TestClient(create_app(s, FakeMonitor(s, states), stores={}))
 
 
 def test_readyz_is_200_only_when_every_engine_is_ready():

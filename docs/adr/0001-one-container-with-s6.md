@@ -23,6 +23,10 @@ shutdown behaviour.
 - **Readiness is owned by the server**, not s6: `/readyz` probes each enabled engine (Postgres over its Unix socket with
   peer auth, Qdrant over HTTP with its API key, FalkorDB with its password) and reports `starting` / `ready` / `down` /
   `failed` with versions and latency. The image's `HEALTHCHECK` uses `/readyz`.
+- A **volume guard** service starts first and holds an exclusive `flock` on the data volume for the container's life.
+  A second container on the same volume stops with a clear error instead of running a second Postgres on the same
+  files. Holding the lock is what makes it safe for bootstrap to clear a `postmaster.pid` left by a killed container
+  (otherwise Postgres refuses to start whenever that PID is reused in the new container).
 - Engines bind to `127.0.0.1` only; `SWSDB_EXPOSE_NATIVE=true` opens them, with authentication always on.
 - Qdrant telemetry is disabled.
 

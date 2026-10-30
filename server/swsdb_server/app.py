@@ -8,13 +8,20 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from . import DATA_FORMAT, __version__
-from .health import Monitor
+from .api_v1 import router as v1_router
+from .health import Monitor, read_secrets
+from .names import NameError_
 from .settings import Settings
+from .stores import Conflict, GraphStore, NotFound, SqlStore, StoreError, Unavailable, VectorStore
 
 log = logging.getLogger("swsdb")
+
+ERROR_CODES = {400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 409: "conflict",
+               422: "invalid", 503: "unavailable"}
 
 
 def _key_from(request: Request) -> str | None:
@@ -24,24 +31,78 @@ def _key_from(request: Request) -> str | None:
     return auth[7:] if auth.lower().startswith("bearer ") else None
 
 
-def create_app(settings: Settings | None = None, monitor: Monitor | None = None) -> FastAPI:
+def _error(status: int, message: str) -> JSONResponse:
+    return JSONResponse({"error": ERROR_CODES.get(status, "error"), "message": message}, status_code=status)
+
+
+def create_app(settings: Settings | None = None, monitor: Monitor | None = None, stores: dict | None = None) -> FastAPI:
     s = settings or Settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if app.state.monitor is None:
+        owned = app.state.monitor is None
+        if owned:
             app.state.monitor = Monitor(s)
             await app.state.monitor.start()
-            owned = True
-        else:
-            owned = False
+        made: list = []
+        if stores is None:
+            secret = read_secrets(s)
+            if "sql" in s.engines:
+                app.state.sql = SqlStore(str(s.pg_socket_dir))
+                await app.state.sql.open()
+                made.append(app.state.sql)
+            if "vector" in s.engines:
+                app.state.vector = VectorStore("http://127.0.0.1:6333", secret["qdrant_api_key"])
+                made.append(app.state.vector)
+            if "graph" in s.engines:
+                app.state.graph = GraphStore("127.0.0.1", 6379, secret["falkordb_password"])
+                made.append(app.state.graph)
         yield
+        for st in made:
+            await st.close()
         if owned:
             await app.state.monitor.stop()
 
     app = FastAPI(title="swsdb", version=__version__, lifespan=lifespan, docs_url="/docs", redoc_url=None)
     app.state.settings = s
     app.state.monitor = monitor
+    app.state.sql = app.state.vector = app.state.graph = None
+    for k, v in (stores or {}).items():
+        setattr(app.state, k, v)
+
+    # one error shape everywhere: {"error": code, "message": text}
+    @app.exception_handler(HTTPException)
+    async def _http(_: Request, e: HTTPException):
+        return _error(e.status_code, str(e.detail))
+
+    @app.exception_handler(RequestValidationError)
+    async def _invalid(_: Request, e: RequestValidationError):
+        msgs = [f"{'.'.join(str(x) for x in err['loc'][1:]) or 'body'}: {err['msg']}" for err in e.errors()]
+        return _error(422, "; ".join(msgs))
+
+    @app.exception_handler(NotFound)
+    async def _nf(_: Request, e: NotFound):
+        return _error(404, str(e))
+
+    @app.exception_handler(Conflict)
+    async def _cf(_: Request, e: Conflict):
+        return _error(409, str(e))
+
+    @app.exception_handler(StoreError)
+    async def _bad(_: Request, e: StoreError):
+        return _error(400, str(e))
+
+    @app.exception_handler(NameError_)
+    async def _name(_: Request, e: NameError_):
+        return _error(422, str(e))
+
+    @app.exception_handler(ValueError)
+    async def _value(_: Request, e: ValueError):
+        return _error(400, str(e))
+
+    @app.exception_handler(Unavailable)
+    async def _down(_: Request, e: Unavailable):
+        return _error(503, str(e))
 
     def require_key(request: Request) -> str:
         """'admin' or 'read' for the caller. With no keys configured, every caller is admin (local use)."""
@@ -52,8 +113,6 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None)
         if given and admin and hmac.compare_digest(given, admin.get_secret_value()):
             return "admin"
         if given and read and hmac.compare_digest(given, read.get_secret_value()):
-            if request.method not in ("GET", "HEAD") and not request.url.path.endswith("/search"):
-                raise HTTPException(403, "this key is read-only")
             return "read"
         raise HTTPException(401, "missing or wrong API key (send it as the `api-key` header or a Bearer token)")
 
@@ -82,7 +141,9 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None)
             "status": m.overall(),
             "uptime_s": round(time.time() - m.started, 1),
             "native_ports_exposed": s.expose_native,
+            "role": role,
             "engines": {c: st.public() for c, st in m.status.items()},
         }
 
+    app.include_router(v1_router(require_key))
     return app

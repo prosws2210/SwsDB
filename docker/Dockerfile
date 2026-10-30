@@ -15,7 +15,8 @@ COPY server/requirements.lock /tmp/requirements.lock
 RUN python -m venv /opt/swsdb/venv \
  && /opt/swsdb/venv/bin/pip install --require-hashes -r /tmp/requirements.lock
 COPY server/ /tmp/server/
-RUN /opt/swsdb/venv/bin/pip install --no-deps /tmp/server \
+COPY sdk/python/ /tmp/sdk/
+RUN /opt/swsdb/venv/bin/pip install --no-deps /tmp/server /tmp/sdk \
  && find /opt/swsdb/venv -name '__pycache__' -prune -exec rm -rf {} +
 
 # ------------------------------------------------------------------ runtime
@@ -76,7 +77,8 @@ RUN set -eux; \
     chmod 0755 /opt/swsdb/bin/* /etc/s6-overlay/s6-rc.d/*/run /etc/s6-overlay/s6-rc.d/*/finish; \
     useradd --system --uid 10001 --user-group --home-dir /swsdb --no-create-home --shell /usr/sbin/nologin swsdb; \
     install -d -o swsdb -g swsdb -m 0750 /swsdb /swsdb/data; \
-    ln -s /opt/swsdb/venv/bin/swsdb-admin /usr/local/bin/swsdb-admin
+    ln -s /opt/swsdb/venv/bin/swsdb-admin /usr/local/bin/swsdb-admin; \
+    ln -s /opt/swsdb/venv/bin/swsdb /usr/local/bin/swsdb
 
 ENV PATH="/opt/swsdb/venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \

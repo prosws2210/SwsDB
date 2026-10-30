@@ -1,6 +1,23 @@
 # swsdb: project plan
 
-Last updated: 2026-10-30 · Owner: Shakti Swaroop Sahu · Status: design
+Last updated: 2026-10-30 · Owner: Shakti Swaroop Sahu · Status: Phase 2 done, Phase 3 next
+
+## Progress
+
+| Phase | Status | Notes |
+|---|---|---|
+| 0 Spikes and decisions | **done** | Image size 246 MB, idle 166 MB, cold start 9.7 s. L1 decided: FalkorDB ([ADR 0002](docs/adr/0002-graph-engine-falkordb.md), 70x faster 2-hop than AGE). Container design: [ADR 0001](docs/adr/0001-one-container-with-s6.md) |
+| 1 The container | **done** | s6-overlay, bootstrap, engine selection, health, crash recovery, durability; container test suite in CI |
+| 2 API, adapters, SDK | **done** | REST v1 (collections, vectors, graph, SQL), adapters, Python SDK + `swsdb` CLI, read-only keys, tenants, sandboxed SQL. TLS moved to Phase 6 (terminate TLS at a proxy until then) |
+| 3 Ingestion and hybrid retrieval | next | |
+| 4–7 | planned | |
+
+Decisions made while building (beyond the ADRs):
+- **No catalog in Phase 2.** A collection is the engine objects named `sw_<tenant>__<collection>`; a vector-only
+  deployment works without Postgres. Documents and the outbox (Phases 3–4) will require the SQL engine.
+- **Pass-through SQL** connects as a separate non-superuser login role (`swsdb_app`, peer-mapped) and is server-side
+  prepared, so it can't escalate, run several statements or leave read-only mode.
+- The CLI ships in the SDK package (`pip install swsdb` gives `swsdb`) and inside the image.
 
 ## 1. The product in one paragraph
 
@@ -294,7 +311,7 @@ Estimates are for one developer working consistently; adjust after Phase 0.
 
 | ID | Decision | Options | Recommendation |
 |---|---|---|---|
-| L1 | Default graph engine | FalkorDB (fast GraphRAG, SSPL) · Apache AGE (in Postgres, Apache-2.0) | Decide in Phase 0 by benchmark. If a hosted offering is likely, prefer AGE as default and FalkorDB as opt-in |
+| L1 | Default graph engine | FalkorDB (fast GraphRAG, SSPL) · Apache AGE (in Postgres, Apache-2.0) | **Decided: FalkorDB** ([ADR 0002](docs/adr/0002-graph-engine-falkordb.md)); hosted offering needs a FalkorDB commercial license or the AGE profile |
 | L2 | "Lite" profile | none · Postgres-only (pgvector + AGE) | Offer later as `SWSDB_PROFILE=lite` for tiny machines |
 | L3 | API port | 6464 · other | 6464 (no clash with the engines' defaults); confirm no common clash |
 | L4 | Server language | Python · Go · Rust | Python for v1; revisit with profiling |
