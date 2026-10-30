@@ -1,0 +1,10 @@
+apiVersion: v2
+name: swsdb
+description: One database for AI applications - PostgreSQL, Qdrant and FalkorDB behind one API, kept consistent, with permission-aware hybrid and graph retrieval.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/prosws2210/SwsDB
+sources:
+  - https://github.com/prosws2210/SwsDB
+keywords: [database, vector, graph, rag, graphrag, postgres, qdrant, falkordb]

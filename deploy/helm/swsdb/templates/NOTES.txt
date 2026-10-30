@@ -1,0 +1,14 @@
+swsdb is starting (the first start creates the databases; give it a minute).
+
+  kubectl port-forward svc/{{ include "swsdb.fullname" . }} 6464:{{ .Values.service.port }}
+  curl localhost:6464/readyz
+  open http://localhost:6464/console
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+Ingress: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- end }}
+
+swsdb sees requests from the ingress with the ingress's Host header: if the console reports cross-origin errors,
+add the public host name with extraEnv SWSDB_ALLOWED_HOSTS.

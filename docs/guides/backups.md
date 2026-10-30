@@ -40,7 +40,13 @@ Let swsdb take a snapshot on a schedule and copy it off the machine, to AWS S3 o
 Cloudflare R2, Backblaze B2, Wasabi, Ceph):
 
 ```bash
-docker run -d --name swsdb -p 6464:6464 -v swsdb-data:/swsdb/data   -e SWSDB_API_KEY_FILE=/run/secrets/admin   -e SWSDB_BACKUP_INTERVAL_H=24 -e SWSDB_BACKUP_KEEP=7   -e SWSDB_BACKUP_S3_URL=https://s3.eu-west-1.amazonaws.com -e SWSDB_BACKUP_S3_REGION=eu-west-1   -e SWSDB_BACKUP_S3_BUCKET=acme-swsdb-backups -e SWSDB_BACKUP_S3_PREFIX=prod   -e SWSDB_BACKUP_S3_ACCESS_KEY_FILE=/run/secrets/s3-access -e SWSDB_BACKUP_S3_SECRET_KEY_FILE=/run/secrets/s3-secret   -v ./secrets:/run/secrets:ro ghcr.io/prosws2210/swsdb
+docker run -d --name swsdb -p 6464:6464 -v swsdb-data:/swsdb/data \
+  -e SWSDB_API_KEY_FILE=/run/secrets/admin \
+  -e SWSDB_BACKUP_INTERVAL_H=24 -e SWSDB_BACKUP_KEEP=7 \
+  -e SWSDB_BACKUP_S3_URL=https://s3.eu-west-1.amazonaws.com -e SWSDB_BACKUP_S3_REGION=eu-west-1 \
+  -e SWSDB_BACKUP_S3_BUCKET=acme-swsdb-backups -e SWSDB_BACKUP_S3_PREFIX=prod \
+  -e SWSDB_BACKUP_S3_ACCESS_KEY_FILE=/run/secrets/s3-access -e SWSDB_BACKUP_S3_SECRET_KEY_FILE=/run/secrets/s3-secret \
+  -v ./secrets:/run/secrets:ro ghcr.io/prosws2210/swsdb
 ```
 
 - **Each run** takes a snapshot (named `swsdb-<time>-backup`), uploads it (in 64 MB parts when it is large), then keeps

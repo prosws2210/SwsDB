@@ -39,7 +39,26 @@ class EngineStatus:
 
 
 def read_secrets(s: Settings) -> dict[str, str]:
-    return json.loads(s.secrets_file.read_text(encoding="utf-8"))
+    try:
+        return json.loads(s.secrets_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:  # every engine external: there are no local engine secrets
+        return {}
+
+
+def qdrant_url(s: Settings) -> str:
+    return (s.qdrant_url or "http://127.0.0.1:6333").rstrip("/")
+
+
+def qdrant_key(s: Settings, secret: dict[str, str]) -> str:
+    return s.qdrant_api_key.get_secret_value() if s.qdrant_api_key else secret.get("qdrant_api_key", "")
+
+
+def graph_client(s: Settings, secret: dict[str, str], timeout: float) -> aioredis.Redis:
+    if s.falkordb_url:
+        return aioredis.Redis.from_url(s.falkordb_url.get_secret_value(), socket_timeout=timeout,
+                                       socket_connect_timeout=min(timeout, 5))
+    return aioredis.Redis(host="127.0.0.1", port=6379, password=secret.get("falkordb_password"),
+                          socket_timeout=timeout, socket_connect_timeout=min(timeout, 5))
 
 
 class Probes:
@@ -47,12 +66,16 @@ class Probes:
 
     def __init__(self, s: Settings, secret: dict[str, str]):
         self.s, self.secret = s, secret
-        self.http = httpx.AsyncClient(timeout=3.0, headers={"api-key": secret.get("qdrant_api_key", "")})
-        self.redis = aioredis.Redis(host="127.0.0.1", port=6379, password=secret.get("falkordb_password"),
-                                    socket_timeout=3, socket_connect_timeout=3)
+        self.qdrant = qdrant_url(s)
+        self.http = httpx.AsyncClient(timeout=3.0, headers={"api-key": qdrant_key(s, secret)})
+        self.redis = graph_client(s, secret, timeout=3)
         self._db_ready = False
 
     async def sql(self) -> str:
+        if self.s.postgres_url:  # external: the database is the operator's (it must exist)
+            async with await psycopg.AsyncConnection.connect(self.s.postgres_url.get_secret_value(),
+                                                             connect_timeout=3, autocommit=True) as conn:
+                return str((await (await conn.execute("SHOW server_version")).fetchone())[0]).split()[0]
         async with await psycopg.AsyncConnection.connect(
                 host=str(self.s.pg_socket_dir), dbname="postgres", user="swsdb", connect_timeout=3,
                 autocommit=True) as conn:
@@ -66,9 +89,9 @@ class Probes:
             return str(version).split()[0]
 
     async def vector(self) -> str:
-        r = await self.http.get("http://127.0.0.1:6333/readyz")
+        r = await self.http.get(f"{self.qdrant}/readyz")
         r.raise_for_status()
-        info = (await self.http.get("http://127.0.0.1:6333/")).json()
+        info = (await self.http.get(f"{self.qdrant}/")).json()
         return str(info.get("version", "?"))
 
     async def graph(self) -> str:

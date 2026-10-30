@@ -18,6 +18,11 @@ jobs:
         run: uv run --project server --frozen ruff check server/swsdb_server sdk tests benchmarks examples
       - name: Unit tests
         run: uv run --project server --frozen pytest -q
+      - name: Helm chart
+        run: |
+          helm lint deploy/helm/swsdb --set apiKey.value=ci
+          helm template ci deploy/helm/swsdb --set apiKey.value=ci --set ingress.enabled=true > /dev/null
+          ! helm template ci deploy/helm/swsdb 2>/dev/null   # refuses to render without an API key
 
   image:
     runs-on: ubuntu-latest

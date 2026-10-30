@@ -14,7 +14,7 @@ from .engines import parse_engines
 # Secrets can come from files instead (Docker and Kubernetes secrets): SWSDB_API_KEY_FILE=/run/secrets/swsdb_key.
 # Environment variables show up in `docker inspect`; mounted files don't.
 SECRET_FILES = ("API_KEY", "READ_ONLY_API_KEY", "LLM_API_KEY", "EMBEDDINGS_API_KEY", "BACKUP_S3_ACCESS_KEY",
-                "BACKUP_S3_SECRET_KEY")
+                "BACKUP_S3_SECRET_KEY", "POSTGRES_URL", "QDRANT_API_KEY", "FALKORDB_URL")
 
 
 def secrets_from_files(environ: dict | None = None) -> None:
@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # host names (and browser origins) accepted besides localhost, IP addresses and the container's hostname
     allowed_hosts: str = ""
     log_level: str = "info"
+    # engines running elsewhere (other containers, managed services): set one and swsdb uses it instead of its own
+    postgres_url: SecretStr | None = None  # postgresql://user:password@host:5432/swsdb (user may CREATE ROLE)
+    qdrant_url: str | None = None  # http://qdrant:6333 or https://xyz.cloud.qdrant.io:6333
+    qdrant_api_key: SecretStr | None = None
+    falkordb_url: SecretStr | None = None  # redis://:password@falkordb:6379 (rediss:// for TLS)
     # HTTPS on the API port: mount a certificate and its key, e.g. -v ./tls:/tls:ro
     tls_cert_file: Path | None = None
     tls_key_file: Path | None = None
@@ -116,6 +121,15 @@ class Settings(BaseSettings):
         if v not in {"debug", "info", "warning", "error"}:
             raise ValueError("SWSDB_LOG_LEVEL must be debug, info, warning or error")
         return v
+
+    def external(self, cap: str) -> bool:
+        """Whether a capability's engine runs outside this container."""
+        return bool({"sql": self.postgres_url, "vector": self.qdrant_url, "graph": self.falkordb_url}.get(cap))
+
+    @property
+    def local_engines(self) -> tuple[str, ...]:
+        """The engines this container runs itself."""
+        return tuple(c for c in self.engines if not self.external(c))
 
     @property
     def allowed_hosts_list(self) -> list[str]:

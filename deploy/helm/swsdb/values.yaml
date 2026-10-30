@@ -1,0 +1,78 @@
+# swsdb runs as one pod (it is a single-node database). By default the pod runs all three engines itself, on one
+# volume. Point it at engines elsewhere (managed services, or charts of your choice) with `externalEngines`.
+
+image:
+  repository: ghcr.io/prosws2210/swsdb
+  tag: ""            # default: the chart's appVersion
+  pullPolicy: IfNotPresent
+
+# The admin API key (reaches every tenant). Required: either a value, or an existing Secret holding it.
+apiKey:
+  value: ""
+  existingSecret: ""
+  key: api-key
+readOnlyApiKey:
+  value: ""
+  existingSecret: ""
+  key: read-only-api-key
+
+# Engines running elsewhere. Each URL comes from a Secret (it may hold a password). Leave a field empty to run that
+# engine inside the pod.
+externalEngines:
+  existingSecret: ""     # a Secret with any of the keys below
+  postgresUrlKey: postgres-url        # postgresql://user:password@host:5432/swsdb (user owns the db, may CREATE ROLE)
+  qdrantUrl: ""                        # e.g. https://xyz.eu-central.aws.cloud.qdrant.io:6333
+  qdrantApiKeyKey: qdrant-api-key
+  falkordbUrlKey: falkordb-url         # redis://:password@host:6379 (rediss:// for TLS)
+
+# Which engines exist at all (sql, vector, graph). Empty: all three.
+engines: ""
+
+llm:
+  url: ""
+  model: ""            # unset: entities linked by name, extractive answers
+  existingSecret: ""   # with key llm-api-key
+
+backups:
+  intervalHours: 0     # take a backup every N hours (0: off)
+  keep: 7
+  s3:
+    url: ""
+    bucket: ""
+    prefix: swsdb
+    region: us-east-1
+    existingSecret: ""   # with keys s3-access-key and s3-secret-key
+
+# Anything else, as SWSDB_* variables (see docs/reference/configuration.md).
+extraEnv: []
+#  - name: SWSDB_RERANK
+#    value: "true"
+
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+
+resources:
+  requests: {cpu: 500m, memory: 1Gi}
+  limits: {memory: 3Gi}
+
+service:
+  type: ClusterIP
+  port: 6464
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: swsdb.example.com
+  tls: []
+#    - secretName: swsdb-tls
+#      hosts: [swsdb.example.com]
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -259,21 +259,22 @@ def run(s: Settings) -> None:
     check_layout(meta)
     secret = _load_secrets(s, uid, gid)
 
-    if "sql" in engines:
+    local = s.local_engines
+    if "sql" in local:
         _owner(s.pg_data, uid, gid, 0o700)
         _init_postgres(s, secret, uid, gid)
-    if "vector" in engines:
+    if "vector" in local:
         _owner(s.qdrant_data, uid, gid, 0o750)
         for d in ("storage", "snapshots"):
             _owner(s.qdrant_data / d, uid, gid, 0o750)
         _write(s.run_dir / "qdrant.yaml", render_qdrant_config(s, secret), uid, gid)
-    if "graph" in engines:
+    if "graph" in local:
         _owner(s.graph_data, uid, gid, 0o750)
         if not FALKORDB_MODULE.is_file():
             raise BootstrapError(f"graph engine module missing at {FALKORDB_MODULE}")
         _write(s.run_dir / "redis.conf", render_redis_conf(s, secret), uid, gid)
 
-    _write(s.run_dir / "engines", "\n".join(engines) + "\n", uid, gid, 0o644)
+    _write(s.run_dir / "engines", "\n".join(local) + "\n", uid, gid, 0o644)  # the s6 services run these
     _write(layout, json.dumps({
         "format": DATA_FORMAT,
         "written_by": __version__,
@@ -286,7 +287,9 @@ def run(s: Settings) -> None:
             if not f.is_file() or not os.access(f, os.R_OK):
                 raise BootstrapError(f"TLS file {f} is missing or unreadable (mount it read-only into the container)")
     exposed = " (native ports exposed)" if s.expose_native else ""
-    print(f"[swsdb] {__version__} starting with engines: {', '.join(engines)}{exposed}", flush=True)
+    external = [c for c in engines if c not in local]
+    note = f"; external: {', '.join(external)}" if external else ""
+    print(f"[swsdb] {__version__} starting with engines: {', '.join(local) or 'none'}{note}{exposed}", flush=True)
     if not s.api_key:
         print("[swsdb] WARNING: SWSDB_API_KEY is not set, so the API on port "
               f"{s.port} accepts every request. Set it before exposing the port beyond this machine.", flush=True)

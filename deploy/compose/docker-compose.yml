@@ -1,0 +1,77 @@
+# swsdb with each engine in its own container.
+#
+#   cp .env.example .env    # then set the passwords and the API key
+#   docker compose up -d
+#   curl localhost:6464/readyz
+#
+# The swsdb container runs only the API server here: SWSDB_POSTGRES_URL, SWSDB_QDRANT_URL and SWSDB_FALKORDB_URL
+# point it at the engines below, so it starts none of its own. Swap any of them for a managed service (RDS, Cloud SQL,
+# Qdrant Cloud, FalkorDB Cloud) by changing its URL and removing the service.
+
+name: swsdb
+
+services:
+  swsdb:
+    image: ${SWSDB_IMAGE:-ghcr.io/prosws2210/swsdb:latest}
+    restart: unless-stopped
+    ports:
+      - "${SWSDB_PORT:-6464}:6464"
+    environment:
+      SWSDB_API_KEY: ${SWSDB_API_KEY:?set SWSDB_API_KEY in .env}
+      SWSDB_POSTGRES_URL: postgresql://swsdb:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/swsdb
+      SWSDB_QDRANT_URL: http://qdrant:6333
+      SWSDB_QDRANT_API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY}
+      SWSDB_FALKORDB_URL: redis://:${FALKORDB_PASSWORD:?set FALKORDB_PASSWORD}@falkordb:6379
+      SWSDB_LLM_URL: ${SWSDB_LLM_URL:-}
+      SWSDB_LLM_MODEL: ${SWSDB_LLM_MODEL:-}
+      SWSDB_LLM_API_KEY: ${SWSDB_LLM_API_KEY:-}
+      SWSDB_BACKUP_INTERVAL_H: ${SWSDB_BACKUP_INTERVAL_H:-0}
+    volumes:
+      - swsdb-data:/swsdb/data   # uploaded originals, snapshots and swsdb's own state
+    depends_on:
+      postgres: {condition: service_healthy}
+      qdrant: {condition: service_started}
+      falkordb: {condition: service_healthy}
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: swsdb          # owns the database and may create the per-tenant SQL roles
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: swsdb
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swsdb -d swsdb"]
+      interval: 5s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  falkordb:
+    image: falkordb/falkordb-server:v4.22.3
+    restart: unless-stopped
+    environment:
+      REDIS_ARGS: --requirepass ${FALKORDB_PASSWORD} --appendonly yes --appendfsync everysec
+      FALKORDB_ARGS: MAX_QUEUED_QUERIES 1000   # and no 1-second query timeout (the image's default)
+      REDISCLI_AUTH: ${FALKORDB_PASSWORD}       # for the health check's redis-cli
+    volumes:
+      - falkordb-data:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      retries: 20
+
+volumes:
+  swsdb-data:
+  postgres-data:
+  qdrant-data:
+  falkordb-data:

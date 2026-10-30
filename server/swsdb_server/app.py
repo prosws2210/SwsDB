@@ -25,7 +25,7 @@ from .backups import Backups
 from .documents import Documents
 from .embed import Embedder
 from .extract import Extractor, NameExtractor
-from .health import Monitor, read_secrets
+from .health import Monitor, qdrant_key, qdrant_url, read_secrets
 from .names import NameError_
 from .settings import Settings
 from .snapshot import Snapshots
@@ -122,15 +122,17 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
         if stores is None:
             secret = read_secrets(s)
             if "sql" in s.engines:
-                app.state.sql = SqlStore(str(s.pg_socket_dir))
+                app.state.sql = SqlStore(None if s.postgres_url else str(s.pg_socket_dir),
+                                         dsn=s.postgres_url.get_secret_value() if s.postgres_url else None)
                 app.state.sql.backup_dir = s.data_dir / "backups"
                 await app.state.sql.open()
                 made.append(app.state.sql)
             if "vector" in s.engines:
-                app.state.vector = VectorStore("http://127.0.0.1:6333", secret["qdrant_api_key"])
+                app.state.vector = VectorStore(qdrant_url(s), qdrant_key(s, secret))
                 made.append(app.state.vector)
             if "graph" in s.engines:
-                app.state.graph = GraphStore("127.0.0.1", 6379, secret["falkordb_password"])
+                app.state.graph = (GraphStore(url=s.falkordb_url.get_secret_value()) if s.falkordb_url
+                                   else GraphStore(password=secret["falkordb_password"]))
                 made.append(app.state.graph)
         app.state.keys = KeyStore(app.state.sql)
         if (s.answer_model or s.llm_model) and app.state.answerer is None:

@@ -13,6 +13,9 @@ suffix (e.g. `SWSDB_API_KEY_FILE=/run/secrets/admin`).
 | `SWSDB_PORT` | `6464` | API port inside the container |
 | `SWSDB_TLS_CERT_FILE`, `SWSDB_TLS_KEY_FILE` | unset | serve HTTPS with this certificate and key (both or neither) |
 | `SWSDB_ALLOWED_HOSTS` | empty | comma-separated host names (and browser origins' hosts) accepted besides localhost, IP addresses and the container's hostname |
+| `SWSDB_POSTGRES_URL` † | unset | use this PostgreSQL instead of the bundled one ([deployment](../guides/deployment.md)) |
+| `SWSDB_QDRANT_URL`, `SWSDB_QDRANT_API_KEY` † | unset | use this Qdrant instead of the bundled one |
+| `SWSDB_FALKORDB_URL` † | unset | use this FalkorDB instead of the bundled one (`redis://` or `rediss://`) |
 | `SWSDB_EXPOSE_NATIVE` | `false` | make the engines' own ports (5432, 6333, 6379) listen beyond localhost |
 | `SWSDB_LOG_LEVEL` | `info` | `debug`, `info`, `warning` or `error` |
 | `SWSDB_ENGINE_START_TIMEOUT_S` | `120` | how long an engine may take to start before it's reported failed |

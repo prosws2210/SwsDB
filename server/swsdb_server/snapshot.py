@@ -148,8 +148,8 @@ class Snapshots:
                 paused = True
             if st.sql is not None:
                 await st.sql.migrate()
-                await run_pg(pg_bin("pg_dump"), "-h", st.sql.socket_dir, "-U", "swsdb", "-d", "swsdb", "-Fc",
-                             "-f", str(work / "postgres.dump"))
+                args, env = st.sql.tool_args()
+                await run_pg(pg_bin("pg_dump"), *args, "-Fc", "-f", str(work / "postgres.dump"), env=env)
                 manifest["migrations"] = (await st.sql.rows("SELECT max(version) AS v FROM swsdb.migrations"))[0]["v"]
                 manifest["sql_tenants"] = [r["role"] for r in await st.sql.rows(
                     "SELECT role FROM swsdb.sql_tenants ORDER BY role")]
@@ -295,8 +295,7 @@ class Snapshots:
 
     async def _restore_postgres(self, dump: Path, tenant_roles: list[str]) -> None:
         sql = self.app.state.sql
-        conninfo = psycopg.conninfo.make_conninfo(host=sql.socket_dir, dbname="postgres", user="swsdb")
-        async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
+        async with await psycopg.AsyncConnection.connect(sql.admin_conninfo("postgres"), autocommit=True) as conn:
             for role in tenant_roles:  # roles live outside the database: create those the dump's objects belong to
                 if not role.startswith("swsdb_t_"):
                     continue
@@ -305,17 +304,19 @@ class Snapshots:
                     await conn.execute(pgsql.SQL(
                         "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS "
                         "NOINHERIT CONNECTION LIMIT 20").format(pgsql.Identifier(role)))
-            await conn.execute("DROP DATABASE IF EXISTS swsdb WITH (FORCE)")
-            await conn.execute("CREATE DATABASE swsdb")
+            db = pgsql.Identifier(sql.dbname)
+            await conn.execute(pgsql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(db))
+            await conn.execute(pgsql.SQL("CREATE DATABASE {}").format(db))
         await sql.drop_connections()
         sql.forget()
-        await run_pg(pg_bin("pg_restore"), "-h", sql.socket_dir, "-U", "swsdb", "-d", "swsdb", "--exit-on-error",
-                     str(dump))
+        args, env = sql.tool_args()
+        await run_pg(pg_bin("pg_restore"), *args, "--exit-on-error", str(dump), env=env)
         for role in tenant_roles:  # search_path is a role setting, not part of the dump
             if role.startswith("swsdb_t_"):
                 await sql.execute(pgsql.SQL("ALTER ROLE {r} SET search_path = {r}").format(
                     r=pgsql.Identifier(role)))
         await sql.migrate()  # a snapshot from an older swsdb is brought up to this version's schema
+        await sql.sync_role_passwords()
 
     async def _restore_vectors(self, folder: Path, names: list[str]) -> None:
         v = self.app.state.vector

@@ -54,6 +54,7 @@ nav:
       - Webhooks: guides/webhooks.md
       - Security and tenants: guides/security.md
       - Snapshots, restore and upgrades: guides/backups.md
+      - Deployment (Compose, Kubernetes, managed engines): guides/deployment.md
       - Operations: guides/operations.md
   - Reference:
       - Configuration: reference/configuration.md

@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
@@ -158,6 +159,10 @@ MIGRATIONS: list[str] = [
     CREATE INDEX webhook_events_due ON swsdb.webhook_events (next_attempt_at)
       WHERE delivered_at IS NULL AND failed_at IS NULL;
     """,
+    # 7: with an external Postgres the sandbox roles log in with passwords (no Unix socket to map OS users on)
+    """
+    CREATE TABLE swsdb.sql_role_secrets (role text PRIMARY KEY, password text NOT NULL);
+    """,
 ]
 
 TENANT_ROLE_PREFIX = "swsdb_t_"  # bootstrap's pg_ident map lets the server log in as any role with this prefix
@@ -203,9 +208,11 @@ def pg_bin(name: str) -> str:
     return f"/usr/lib/postgresql/{os.environ.get('SWSDB_PG_MAJOR', '17')}/bin/{name}"
 
 
-async def run_pg(*args: str) -> None:
-    """Run a PostgreSQL client tool (pg_dump, pg_restore) and turn a failure into a clear error."""
-    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+async def run_pg(*args: str, env: dict[str, str] | None = None) -> None:
+    """Run a PostgreSQL client tool (pg_dump, pg_restore) and turn a failure into a clear error. Passwords go in the
+    environment (`env`), never on the command line."""
+    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                                env={**os.environ, **(env or {})} if env else None)
     out, err = await proc.communicate()
     if proc.returncode != 0:
         tool = os.path.basename(args[0])
@@ -221,21 +228,77 @@ async def _reset_session(conn) -> None:
 class SqlStore:
     MAX_TENANT_POOLS = 32
 
-    def __init__(self, socket_dir: str, dbname: str = "swsdb", max_size: int = 10):
-        self._conninfo = lambda user: psycopg.conninfo.make_conninfo(host=socket_dir, dbname=dbname, user=user,
-                                                                     connect_timeout=5)
-        self.pool = AsyncConnectionPool(conninfo=self._conninfo("swsdb"), min_size=0, max_size=4, open=False,
+    def __init__(self, socket_dir: str | None, dbname: str = "swsdb", max_size: int = 10, dsn: str | None = None):
+        """The bundled Postgres over its Unix socket (`socket_dir`), or an external one (`dsn`, whose user owns the
+        database and may create roles)."""
+        self.dsn = dsn
+        self.socket_dir = socket_dir
+        self.dbname = (psycopg.conninfo.conninfo_to_dict(dsn).get("dbname") or dbname) if dsn else dbname
+        self.pool = AsyncConnectionPool(conninfo=self._conninfo(None), min_size=0, max_size=4, open=False,
                                         kwargs={"autocommit": True})  # swsdb's own work: migrations, catalog
+        self._passwords: dict[str, str] = {}
         self._max_size = max_size
         self._tenant_pools: dict[str, AsyncConnectionPool] = {}  # role -> pool, most recently used last
         self._roles: dict[str, str] = {"default": APP_ROLE}
         self._migrated = False
-        self.socket_dir = socket_dir
         self.backup_dir: Path | None = None  # where a dump goes before migrating existing data (set by the app)
         self.last_backup: Path | None = None
 
-    def _sandbox_pool(self, role: str, size: int) -> AsyncConnectionPool:
-        return AsyncConnectionPool(conninfo=self._conninfo(role), min_size=0, max_size=size, open=False,
+    def _conninfo(self, role: str | None, password: str | None = None, dbname: str | None = None) -> str:
+        """`role` None: swsdb's own login (the DSN's user, or the swsdb superuser over the socket)."""
+        if self.dsn:
+            extra = {"user": role, "password": password} if role else {}
+            return psycopg.conninfo.make_conninfo(self.dsn, connect_timeout=5, **extra,
+                                                  **({"dbname": dbname} if dbname else {}))
+        return psycopg.conninfo.make_conninfo(host=self.socket_dir, dbname=dbname or self.dbname,
+                                              user=role or "swsdb", connect_timeout=5)
+
+    def tool_args(self, dbname: str | None = None) -> tuple[list[str], dict[str, str]]:
+        """Connection arguments and environment for pg_dump / pg_restore."""
+        if not self.dsn:
+            return ["-h", self.socket_dir, "-U", "swsdb", "-d", dbname or self.dbname], {}
+        p = psycopg.conninfo.conninfo_to_dict(self.dsn)
+        args = ["-h", str(p.get("host") or "localhost"), "-p", str(p.get("port") or 5432), "-U", str(p.get("user")),
+                "-d", dbname or self.dbname]
+        env = {"PGPASSWORD": str(p.get("password") or "")}
+        if p.get("sslmode"):
+            env["PGSSLMODE"] = str(p["sslmode"])
+        return args, env
+
+    def admin_conninfo(self, dbname: str) -> str:
+        return self._conninfo(None, dbname=dbname)
+
+    async def _role_password(self, role: str) -> str | None:
+        """External Postgres only: the sandbox role's password, set (and remembered) on first use."""
+        if not self.dsn:
+            return None
+        if role in self._passwords:
+            return self._passwords[role]
+        rows = await self.rows("SELECT password FROM swsdb.sql_role_secrets WHERE role = %s", [role])
+        if rows:
+            pw = rows[0]["password"]
+        else:
+            pw = secrets.token_urlsafe(32)
+            async with self.pool.connection() as conn, conn.transaction():
+                await conn.execute(pgsql.SQL("ALTER ROLE {} PASSWORD {}").format(pgsql.Identifier(role),
+                                                                                 pgsql.Literal(pw)))
+                await conn.execute("INSERT INTO swsdb.sql_role_secrets (role, password) VALUES (%s, %s) "
+                                   "ON CONFLICT (role) DO UPDATE SET password = EXCLUDED.password", [role, pw])
+        self._passwords[role] = pw
+        return pw
+
+    async def sync_role_passwords(self) -> None:
+        """After a restore onto an external Postgres: give the roles the passwords the restored catalog holds."""
+        if not self.dsn:
+            return
+        self._passwords.clear()
+        for row in await self.rows("SELECT s.role, s.password FROM swsdb.sql_role_secrets s "
+                                   "JOIN pg_roles r ON r.rolname = s.role"):
+            await self.execute(pgsql.SQL("ALTER ROLE {} PASSWORD {}").format(pgsql.Identifier(row["role"]),
+                                                                             pgsql.Literal(row["password"])))
+
+    def _sandbox_pool(self, role: str, size: int, password: str | None = None) -> AsyncConnectionPool:
+        return AsyncConnectionPool(conninfo=self._conninfo(role, password), min_size=0, max_size=size, open=False,
                                    kwargs={"autocommit": True}, reset=_reset_session)
 
     async def open(self) -> None:
@@ -288,7 +351,8 @@ class SqlStore:
         role = await self.tenant_role(tenant)
         pool = self._tenant_pools.pop(role, None)
         if pool is None:
-            pool = self._sandbox_pool(role, self._max_size if role == APP_ROLE else 4)
+            pool = self._sandbox_pool(role, self._max_size if role == APP_ROLE else 4,
+                                      await self._role_password(role))
             await pool.open(wait=False)
             while len(self._tenant_pools) >= self.MAX_TENANT_POOLS:  # close the least recently used
                 old = self._tenant_pools.pop(next(iter(self._tenant_pools)))
@@ -315,8 +379,8 @@ class SqlStore:
                 # an upgrade: keep the data as it was, so a rollback is a pg_restore away
                 self.backup_dir.mkdir(parents=True, exist_ok=True)
                 path = self.backup_dir / f"before-schema-{max(pending)}-{time.strftime('%Y%m%d-%H%M%S')}.dump"
-                await run_pg(pg_bin("pg_dump"), "-h", self.socket_dir, "-U", "swsdb", "-d", "swsdb", "-Fc",
-                             "-f", str(path))
+                args, env = self.tool_args()
+                await run_pg(pg_bin("pg_dump"), *args, "-Fc", "-f", str(path), env=env)
                 self.last_backup = path
             for version, ddl in enumerate(MIGRATIONS, start=1):
                 if version not in done:
@@ -328,6 +392,7 @@ class SqlStore:
         """The database was replaced (restore): migrate again and recreate tenant roles and pools on next use."""
         self._migrated = False
         self._roles = {"default": APP_ROLE}
+        self._passwords.clear()
 
     async def drop_connections(self) -> None:
         """After the database was dropped and recreated: discard pooled connections to the old one."""
@@ -634,8 +699,10 @@ def _value(v: Any) -> Any:
 
 
 class GraphStore:
-    def __init__(self, host: str, port: int, password: str):
-        self.r = aioredis.Redis(host=host, port=port, password=password, socket_timeout=60, socket_connect_timeout=5)
+    def __init__(self, host: str = "127.0.0.1", port: int = 6379, password: str | None = None, url: str | None = None):
+        """The bundled FalkorDB, or an external one by `url` (redis://:password@host:6379, rediss:// for TLS)."""
+        self.r = (aioredis.Redis.from_url(url, socket_timeout=60, socket_connect_timeout=5) if url else
+                  aioredis.Redis(host=host, port=port, password=password, socket_timeout=60, socket_connect_timeout=5))
 
     async def close(self) -> None:
         await self.r.aclose()

@@ -1,0 +1,140 @@
+{{- if and (not .Values.apiKey.value) (not .Values.apiKey.existingSecret) }}
+{{- fail "set apiKey.value or apiKey.existingSecret: a swsdb reachable from a cluster must not run without an API key" }}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "swsdb.fullname" . }}
+  labels: {{- include "swsdb.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "swsdb.fullname" . }}
+  replicas: 1  # one pod: swsdb is a single-node database (it locks its volume)
+  selector:
+    matchLabels: {{- include "swsdb.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "swsdb.selector" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      securityContext:
+        fsGroup: 10001
+      terminationGracePeriodSeconds: 60  # engines flush to disk on shutdown
+      containers:
+        - name: swsdb
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 6464
+          env:
+            - name: SWSDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "swsdb.keySecret" (dict "existing" .Values.apiKey.existingSecret "root" .) }}
+                  key: {{ .Values.apiKey.key }}
+            {{- if or .Values.readOnlyApiKey.value .Values.readOnlyApiKey.existingSecret }}
+            - name: SWSDB_READ_ONLY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "swsdb.keySecret" (dict "existing" .Values.readOnlyApiKey.existingSecret "root" .) }}
+                  key: {{ .Values.readOnlyApiKey.key }}
+            {{- end }}
+            {{- with .Values.engines }}
+            - name: SWSDB_ENGINES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.externalEngines }}
+            {{- if .existingSecret }}
+            - name: SWSDB_POSTGRES_URL
+              valueFrom: {secretKeyRef: {name: {{ .existingSecret }}, key: {{ .postgresUrlKey }}, optional: true}}
+            - name: SWSDB_QDRANT_API_KEY
+              valueFrom: {secretKeyRef: {name: {{ .existingSecret }}, key: {{ .qdrantApiKeyKey }}, optional: true}}
+            - name: SWSDB_FALKORDB_URL
+              valueFrom: {secretKeyRef: {name: {{ .existingSecret }}, key: {{ .falkordbUrlKey }}, optional: true}}
+            {{- end }}
+            {{- if .qdrantUrl }}
+            - name: SWSDB_QDRANT_URL
+              value: {{ .qdrantUrl | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.llm }}
+            {{- if .model }}
+            - name: SWSDB_LLM_URL
+              value: {{ .url | quote }}
+            - name: SWSDB_LLM_MODEL
+              value: {{ .model | quote }}
+            {{- end }}
+            {{- if .existingSecret }}
+            - name: SWSDB_LLM_API_KEY
+              valueFrom: {secretKeyRef: {name: {{ .existingSecret }}, key: llm-api-key}}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.backups }}
+            {{- if .intervalHours }}
+            - name: SWSDB_BACKUP_INTERVAL_H
+              value: {{ .intervalHours | quote }}
+            - name: SWSDB_BACKUP_KEEP
+              value: {{ .keep | quote }}
+            {{- end }}
+            {{- if .s3.bucket }}
+            - name: SWSDB_BACKUP_S3_URL
+              value: {{ .s3.url | quote }}
+            - name: SWSDB_BACKUP_S3_BUCKET
+              value: {{ .s3.bucket | quote }}
+            - name: SWSDB_BACKUP_S3_PREFIX
+              value: {{ .s3.prefix | quote }}
+            - name: SWSDB_BACKUP_S3_REGION
+              value: {{ .s3.region | quote }}
+            - name: SWSDB_BACKUP_S3_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: {{ .s3.existingSecret }}, key: s3-access-key}}
+            - name: SWSDB_BACKUP_S3_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: {{ .s3.existingSecret }}, key: s3-secret-key}}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}  # the process; an engine restarting doesn't kill the pod
+            periodSeconds: 15
+            failureThreshold: 4
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /swsdb/data
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not .Values.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

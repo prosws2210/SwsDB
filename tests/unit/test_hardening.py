@@ -143,3 +143,23 @@ def test_mcp_endpoints_check_the_key_before_any_session():
         rw = c.post("/mcp/rw", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
                     headers={**accept, "api-key": "adm"}).json()["result"]["tools"]
         assert {"remember", "add_document", "delete_document", "forget"} <= {x["name"] for x in rw}
+
+
+def test_sql_store_connects_locally_or_to_an_external_postgres():
+    from swsdb_server.stores import SqlStore
+    local = SqlStore("/run/swsdb/pg")
+    assert "host=/run/swsdb/pg" in local._conninfo(None) and "user=swsdb" in local._conninfo(None)
+    assert local.tool_args() == (["-h", "/run/swsdb/pg", "-U", "swsdb", "-d", "swsdb"], {})
+    ext = SqlStore(None, dsn="postgresql://owner:pw@db.example.com:6543/app?sslmode=require")
+    assert ext.dbname == "app"
+    sandbox = ext._conninfo("swsdb_t_acme", "secret")
+    assert "user=swsdb_t_acme" in sandbox and "password=secret" in sandbox and "host=db.example.com" in sandbox
+    args, env = ext.tool_args()
+    assert args == ["-h", "db.example.com", "-p", "6543", "-U", "owner", "-d", "app"]
+    assert env == {"PGPASSWORD": "pw", "PGSSLMODE": "require"}  # never on the command line
+    assert "dbname=postgres" in ext.admin_conninfo("postgres")
+
+
+def test_external_engines_are_not_run_locally():
+    s = Settings(qdrant_url="http://qdrant:6333", falkordb_url="redis://:pw@falkordb:6379")
+    assert s.local_engines == ("sql",) and s.external("vector") and not s.external("sql")
