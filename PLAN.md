@@ -40,6 +40,11 @@ Decisions made while building (beyond the ADRs):
 - **Extractive answers follow the chain.** The first sentence covers the question best. Each further sentence must add
   question words not yet covered, and share a name with what is already picked (or add two new words). That keeps
   noise out and lets an offline answer span two documents.
+- **Entities are created with their mentions, in one query.** With two ingest workers, one document's orphan
+  clean-up could delete an entity another document had just created, before its mention edge existed. The
+  edge then silently matched nothing. Seen in the console's graph explorer. Reconciliation now compares mention
+  counts with the catalog, so this kind of drift is found and repaired, and the quality gate asserts zero issues after
+  ingesting.
 - **MCP tools call the REST API** with the caller's key (in-process for `/mcp`, over HTTP for `swsdb mcp`), so agents
   can never get more than the key allows. The tools live in the SDK, shared by both transports.
 - **Chunks keep their paragraphs.** Joining words with spaces had run headings into first sentences, which hurt

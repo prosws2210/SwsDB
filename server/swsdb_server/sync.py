@@ -389,14 +389,13 @@ class Sync:
         for b in range(0, len(pairs), 500):
             await q("UNWIND $pairs AS p MATCH (a:Chunk {id: p[0]}), (b:Chunk {id: p[1]}) CREATE (a)-[:NEXT]->(b)",
                     {"pairs": pairs[b:b + 500]})
-        unique = list({e["key"]: {"key": e["key"], "name": e["name"], "type": e["type"]} for e in ents}.values())
-        for b in range(0, len(unique), 500):
-            await q("UNWIND $ents AS e MERGE (n:Entity {key: e.key}) ON CREATE SET n.name = e.name, n.type = e.type",
-                    {"ents": unique[b:b + 500]})
-        mentions = [{"chunk": e["chunk"], "key": e["key"]} for e in ents]
+        # entity and mention in one query: another document's orphan clean-up (below) can't remove an entity
+        # between its creation and the edge that keeps it (FalkorDB runs each query atomically)
+        mentions = [{"chunk": e["chunk"], "key": e["key"], "name": e["name"], "type": e["type"]} for e in ents]
         for b in range(0, len(mentions), 500):
-            await q("UNWIND $m AS x MATCH (c:Chunk {id: x.chunk}), (n:Entity {key: x.key}) "
-                    "CREATE (c)-[:MENTIONS]->(n)", {"m": mentions[b:b + 500]})
+            await q("UNWIND $m AS x MATCH (c:Chunk {id: x.chunk}) MERGE (n:Entity {key: x.key}) "
+                    "ON CREATE SET n.name = x.name, n.type = x.type CREATE (c)-[:MENTIONS]->(n)",
+                    {"m": mentions[b:b + 500]})
         for b in range(0, len(rels), 500):
             await q("UNWIND $r AS x MATCH (a:Entity {key: x.source}), (b:Entity {key: x.target}) "
                     "MERGE (a)-[:RELATED {type: x.type}]->(b)", {"r": rels[b:b + 500]})
@@ -564,18 +563,25 @@ class Sync:
 
         # graph
         if coll["graph"] and d.graph:
-            g_counts: dict[str, int] = {}
+            g_counts: dict[str, tuple[int, int]] = {}
             if await d.graph.exists(key):
                 res = await d.graph.query(key, "MATCH (dd:Document) OPTIONAL MATCH (dd)-[:HAS_CHUNK]->(c:Chunk) "
-                                               "RETURN dd.id, count(c)", None, read_only=True, timeout_s=120)
-                g_counts = {doc: n for doc, n in res["rows"]}
+                                               "OPTIONAL MATCH (c)-[m:MENTIONS]->(:Entity) "
+                                               "RETURN dd.id, count(DISTINCT c), count(m)", None, read_only=True,
+                                          timeout_s=120)
+                g_counts = {doc: (n, m) for doc, n, m in res["rows"]}
+            mentions = {str(r["id"]): r["n"] for r in await d.rows(
+                "SELECT dd.id, count(*) AS n FROM swsdb.documents dd JOIN swsdb.chunks c ON c.document_id = dd.id "
+                "AND c.version = dd.live_version JOIN swsdb.chunk_entities ce ON ce.chunk_id = c.id "
+                "WHERE dd.tenant = %s AND dd.collection = %s GROUP BY dd.id", [tenant, name])}
             for doc in g_counts:
                 if doc not in docs:
                     found["orphan_graph"] += 1
                     if not dry_run:
                         await self.remove_graph(key, doc)
             for doc_id, r in docs.items():
-                if r["status"] == "ready" and doc_id not in busy and g_counts.get(doc_id) != r["chunks"]:
+                if r["status"] == "ready" and doc_id not in busy and \
+                        g_counts.get(doc_id) != (r["chunks"], mentions.get(doc_id, 0)):
                     found["graph_mismatch"] += 1
                     if doc_id not in to_index:
                         to_graph.add(doc_id)

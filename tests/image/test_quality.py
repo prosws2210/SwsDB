@@ -46,6 +46,8 @@ def report():
             kb.add_text(d["id"], d["text"], title=d["title"])
         for d in data["documents"]:
             kb.wait_ready(d["id"], timeout=600)
+        # two workers wrote graphs sharing entities at once: every mention must have survived
+        assert db.reconcile()["issues"] == 0
         cases = [{k: q[k] for k in ("query", "relevant", "answer")} for q in data["questions"]]
         kb.put_eval_set("all", cases)
         kb.put_eval_set("multihop", [c for c, q in zip(cases, data["questions"], strict=True) if q.get("hops") == 2])
