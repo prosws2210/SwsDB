@@ -14,3 +14,5 @@ known-first-party = ["swsdb_server"]
 # FastAPI dependencies are declared as argument defaults by design
 "server/swsdb_server/api_v1.py" = ["B008"]
 "server/swsdb_server/app.py" = ["B008"]
+# tests use seeded randomness for reproducible chaos runs
+"tests/**" = ["S311"]

@@ -1,6 +1,6 @@
 # swsdb: project plan
 
-Last updated: 2026-10-30 · Owner: Shakti Swaroop Sahu · Status: Phase 3 done, Phase 4 next
+Last updated: 2026-10-30 · Owner: Shakti Swaroop Sahu · Status: Phase 4 done, Phase 5 next
 
 ## Progress
 
@@ -10,8 +10,9 @@ Last updated: 2026-10-30 · Owner: Shakti Swaroop Sahu · Status: Phase 3 done, 
 | 1 The container | **done** | s6-overlay, bootstrap, engine selection, health, crash recovery, durability; container test suite in CI |
 | 2 API, adapters, SDK | **done** | REST v1 (collections, vectors, graph, SQL), adapters, Python SDK + `swsdb` CLI, read-only keys, tenants, sandboxed SQL. TLS moved to Phase 6 (terminate TLS at a proxy until then) |
 | 3 Ingestion and hybrid retrieval | **done** | Documents (PDF, Markdown, HTML, text) chunked by structure, dense (bge-small, offline) + BM25 sparse vectors fused by RRF, optional LLM entity extraction, graph expansion (adjacent passages, shared entities, related entities), permissions in every engine query. 200-page PDF ingested in 12.6 s and cited by page. Re-ranking moved to Phase 5 |
-| 4 Consistency | next | |
-| 5–7 | planned | |
+| 4 Consistency | **done** | Transactional outbox, idempotent sync steps, transient/permanent errors with backoff and immediate retry on engine recovery, catalog-checked queries (deletes hidden at once, only live versions), reconciliation (`/v1/admin/reconcile`, `swsdb doctor`, every 10 min) that rebuilds the graph without LLM calls. Exit criterion met: 100/100 chaos rounds converged with zero orphans and zero deleted content returned (13 Postgres kills, 22 Qdrant kills, 16 FalkorDB kills, 18 server kills, 31 engines held down mid-write) ([ADR 0003](docs/adr/0003-consistency-model.md)) |
+| 5 Console, evaluation, observability | next | |
+| 6–7 | planned | |
 
 Decisions made while building (beyond the ADRs):
 - **No catalog in Phase 2.** A collection is the engine objects named `sw_<tenant>__<collection>`; a vector-only
@@ -31,8 +32,7 @@ Decisions made while building (beyond the ADRs):
 
 Known gaps (tracked):
 - Cypher pass-through returns lists and maps as text (FalkorDB's verbose reply format). Decode the compact format.
-- Ingestion retries and cross-store repair are Phase 4 (today a failed document is marked `failed` with the reason;
-  re-uploading retries it).
+- Reconciliation covers document collections; raw vector/graph collections have no catalog to compare with.
 
 ## 1. The product in one paragraph
 

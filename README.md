@@ -2,12 +2,12 @@
 
 **One database for AI applications: relational, vector and graph in a single Docker container.**
 
-> **Status: early development (Phases 0–3 of [PLAN.md](PLAN.md) done).** Working today: PostgreSQL 17, Qdrant 1.19
+> **Status: early development (Phases 0–4 of [PLAN.md](PLAN.md) done).** Working today: PostgreSQL 17, Qdrant 1.19
 > and FalkorDB 4.22 in one supervised image; document ingestion (PDF, Markdown, HTML, text) with hybrid retrieval
-> (dense + BM25) and graph expansion; permissions per document; a REST API for collections, vectors, graph (Cypher)
-> and SQL; tenants; admin and read-only API keys; a Python SDK and `swsdb` CLI; tested crash recovery and durability.
-> Cross-store consistency guarantees, evaluation and the console are next; sections marked *(planned)* describe them.
-> No image is published yet: build it from source (below).
+> (dense + BM25) and graph expansion; permissions per document; cross-store consistency (outbox, retries,
+> reconciliation) proven by chaos tests; a REST API for collections, vectors, graph (Cypher) and SQL; tenants; admin
+> and read-only API keys; a Python SDK and `swsdb` CLI. Evaluation, the console and backups are next; items marked
+> *(planned)* describe them. No image is published yet: build it from source (below).
 
 ## Try it now (from source)
 
@@ -96,30 +96,30 @@ docker run -d -p 6464:6464 -e SWSDB_ENGINES=vector,graph swsdb/swsdb    # GraphR
 docker run -d -p 6464:6464 swsdb/swsdb                                  # all three (default)
 ```
 
-## What you get *(planned unless noted)*
+## What you get
 
-- **Ingest once.** Send a document (PDF, Markdown, HTML, text). swsdb records it, chunks it, embeds the chunks into the
+- **Ingest once.** *(working)* Send a document (PDF, Markdown, HTML, text). swsdb records it, chunks it, embeds the chunks into the
   vector store and extracts entities and relationships into the graph, all linked by the same `document_id` and
   `chunk_id`.
-- **Retrieve once.** One search call combines dense and keyword (sparse) vector search with optional graph expansion,
+- **Retrieve once.** *(working)* One search call combines dense and keyword (sparse) vector search with optional graph expansion,
   filters by the caller's permissions at every step, and returns evidence with its source: document, page, chunk and
   the graph path that led there.
-- **Stays consistent.** Updating or deleting a document reaches every engine, even when one is briefly down: a
+- **Stays consistent.** *(working)* Updating or deleting a document reaches every engine, even when one is down: a
   transactional outbox, idempotent retries and a reconciliation job repair any drift. No orphaned vectors, no ghost
-  entities.
-- **Multi-tenant from day one.** Tenants, collections and access rules are part of the data model and are enforced in
+  entities, and a deleted document never comes back in results. See [Consistency](#consistency).
+- **Multi-tenant from day one.** *(working)* Tenants, collections and access rules are part of the data model and are enforced in
   SQL, vector and graph queries alike.
-- **Measures your retrieval.** Built-in evaluation (recall@k, MRR, nDCG, latency) against a golden set, so you can
+- **Measures your retrieval.** *(planned)* Built-in evaluation (recall@k, MRR, nDCG, latency) against a golden set, so you can
   compare chunking, embedding models or graph settings with numbers instead of guesses.
-- **See everything.** A web console for collections, ingestion jobs, failures, vector and graph growth and query
+- **See everything.** *(planned)* A web console for collections, ingestion jobs, failures, vector and graph growth and query
   latency; Prometheus metrics and OpenTelemetry traces for your own dashboards.
-- **No lock-in.** The native engines stay reachable. Use `psql`, the Qdrant client or Cypher directly whenever you need
+- **No lock-in.** *(working)* The native engines stay reachable. Use `psql`, the Qdrant client or Cypher directly whenever you need
   something swsdb's API doesn't cover.
-- **Works offline.** A small local embedding model is built in, so search works with no API key; switch to OpenAI,
-  Cohere, Ollama or any OpenAI-compatible endpoint in one setting.
-- **One backup.** `swsdb snapshot` captures all engines at one consistent point; `swsdb restore` brings them back
+- **Works offline.** *(working)* A small local embedding model is built in, so search works with no API key; switch
+  to OpenAI, Ollama or any OpenAI-compatible endpoint in one setting.
+- **One backup.** *(planned)* `swsdb snapshot` captures all engines at one consistent point; `swsdb restore` brings them back
   together.
-- **Built for agents.** A built-in MCP server lets coding agents and AI assistants search and update the knowledge
+- **Built for agents.** *(planned)* A built-in MCP server lets coding agents and AI assistants search and update the knowledge
   base with the same permissions as your API.
 
 ## A taste of the SDK *(planned)*
@@ -151,13 +151,39 @@ db.sql("SELECT id, title FROM documents WHERE tenant = %s", ["acme"])
 db.cypher("MATCH (p:Product)-[:MENTIONED_IN]->(d:Document) RETURN p.name, count(d)")
 ```
 
+## Consistency
+
+Three engines, no shared transaction, so swsdb makes the guarantees itself ([ADR 0003](docs/adr/0003-consistency-model.md)):
+
+- **Accepted means durable.** An upload or delete is committed to Postgres, the source of truth, together with an
+  outbox entry before the API answers. Uploads and deletes keep working while Qdrant or FalkorDB is down; they are
+  applied when it's back.
+- **Readers see whole versions only.** A new version becomes visible in one step when every store has it; queries are
+  checked against the catalog, so they never return a deleted document or a stale version, even before the stores
+  have caught up.
+- **Failures heal themselves.** Engine outages are retried with backoff (and immediately when the engine returns);
+  crashes resume where they stopped; a broken file fails with its reason.
+- **Drift is found and fixed.** Reconciliation compares the catalog with what Qdrant and the graph actually hold and
+  repairs missing vectors, stale versions, orphans and graph mismatches, rebuilding the graph from the catalog without
+  calling the LLM again. It runs every 10 minutes and on demand:
+
+```bash
+swsdb doctor            # report
+swsdb doctor --repair   # fix
+```
+
+Proven by chaos tests that kill or pause Postgres, Qdrant, FalkorDB and the server mid-write and check, after every
+round, that all three stores agree with the catalog (latest run: **100 of 100 rounds
+consistent**: Postgres killed 13x, Qdrant killed 22x, FalkorDB killed 16x, the swsdb server killed 18x, Qdrant held
+down 14x, FalkorDB held down 17x; no lost writes, no deleted document ever returned).
+
 ## Configuration
 
 Environment variables cover the common cases; mount a `swsdb.yaml` for the rest *(planned)*. Working today:
 `SWSDB_ENGINES`, `SWSDB_API_KEY`, `SWSDB_READ_ONLY_API_KEY`, `SWSDB_EXPOSE_NATIVE`, `SWSDB_LOG_LEVEL`,
 `SWSDB_EMBEDDINGS` (`local` or `openai` with `SWSDB_EMBEDDINGS_URL` / `_MODEL` / `_API_KEY` for any OpenAI-compatible
 endpoint), `SWSDB_LLM_URL` / `SWSDB_LLM_MODEL` / `SWSDB_LLM_API_KEY` (entity extraction), `SWSDB_INGEST_WORKERS` and
-`SWSDB_MAX_UPLOAD_MB`.
+`SWSDB_MAX_UPLOAD_MB` and `SWSDB_RECONCILE_INTERVAL_S` (default 600; 0 = on request only).
 
 | Variable | Default | Meaning |
 |---|---|---|

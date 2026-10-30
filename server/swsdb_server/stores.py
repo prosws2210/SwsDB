@@ -82,6 +82,30 @@ MIGRATIONS: list[str] = [
       chunk_id uuid NOT NULL REFERENCES swsdb.chunks ON DELETE CASCADE,
       source text NOT NULL, target text NOT NULL, type text NOT NULL, PRIMARY KEY (chunk_id, source, target, type));
     """,
+    # 3: consistency. Every change is an outbox row written in the same transaction as the catalog change; workers
+    # apply it to the derived stores (idempotently, with retries). live_version is the version queries may return.
+    """
+    ALTER TABLE swsdb.documents ADD COLUMN live_version int;
+    UPDATE swsdb.documents SET live_version = version WHERE status = 'ready';
+    ALTER TABLE swsdb.documents ADD COLUMN attempts int NOT NULL DEFAULT 0;
+    ALTER TABLE swsdb.chunks ADD COLUMN extracted boolean NOT NULL DEFAULT false;
+    UPDATE swsdb.chunks c SET extracted = true
+      WHERE EXISTS (SELECT 1 FROM swsdb.chunk_entities e WHERE e.chunk_id = c.id);
+    CREATE TABLE swsdb.outbox (
+      id bigserial PRIMARY KEY,
+      document_id uuid NOT NULL REFERENCES swsdb.documents ON DELETE CASCADE,
+      op text NOT NULL CHECK (op IN ('index', 'delete', 'graph')),
+      version int NOT NULL,
+      attempts int NOT NULL DEFAULT 0,
+      next_attempt_at timestamptz NOT NULL DEFAULT now(),
+      locked_until timestamptz,
+      last_error text,
+      created_at timestamptz NOT NULL DEFAULT now());
+    CREATE INDEX outbox_due ON swsdb.outbox (next_attempt_at);
+    CREATE INDEX outbox_document ON swsdb.outbox (document_id, id);
+    INSERT INTO swsdb.outbox (document_id, op, version)
+      SELECT id, 'index', version FROM swsdb.documents WHERE status IN ('queued', 'processing');
+    """,
 ]
 
 
@@ -317,6 +341,24 @@ class VectorStore:
 
     async def delete_where(self, name: str, flt: dict) -> None:
         await self._call("POST", f"/collections/{name}/points/delete", params={"wait": "true"}, json={"filter": flt})
+
+    async def count(self, name: str, flt: dict) -> int:
+        body = {"filter": flt, "exact": True}
+        return int((await self._call("POST", f"/collections/{name}/points/count", json=body))["result"]["count"])
+
+    async def scan(self, name: str, fields: list[str], page: int = 1000):
+        """Every point's id and the given payload fields, page by page (for reconciliation)."""
+        offset = None
+        while True:
+            body: dict[str, Any] = {"limit": page, "with_payload": {"include": fields}, "with_vector": False}
+            if offset is not None:
+                body["offset"] = offset
+            r = (await self._call("POST", f"/collections/{name}/points/scroll", json=body))["result"]
+            for pt in r["points"]:
+                yield pt
+            offset = r.get("next_page_offset")
+            if offset is None:
+                return
 
     async def query(self, name: str, body: dict) -> list[dict]:
         return (await self._call("POST", f"/collections/{name}/points/query", json=body))["result"]["points"]

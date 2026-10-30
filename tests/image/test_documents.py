@@ -21,8 +21,16 @@ ADMIN, READ = "admin-docs-key", "read-docs-key"
 FAKE_LLM = r'''
 import json, re
 from http.server import BaseHTTPRequestHandler, HTTPServer
+CALLS = [0]
 class H(BaseHTTPRequestHandler):
+    def do_GET(self):  # how many extraction calls were made
+        data = json.dumps({"calls": CALLS[0]}).encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
     def do_POST(self):
+        CALLS[0] += 1
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         text = body["messages"][-1]["content"].split("Text:\n", 1)[-1]
         names = sorted(set(re.findall(r"\b[A-Z][a-z]+(?: [A-Z][a-z]+)+\b", text)))

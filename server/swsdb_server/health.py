@@ -93,6 +93,8 @@ class Monitor:
             c: EngineStatus(capability=c, engine=ENGINES[c].product) for c in s.engines}
         self._task: asyncio.Task | None = None
         self.probes: Probes | None = None
+        self._rechecking: set[str] = set()
+        self.on_ready: list = []  # async callbacks(capability) when an engine comes back after being down
 
     @property
     def ready(self) -> bool:
@@ -124,9 +126,21 @@ class Monitor:
             return
         if st.state != "ready":
             log.info("%s ready: %s %s", cap, st.engine, version)
+            recovered = st.state == "down"
             st.state, st.since = "ready", time.time()
+            if recovered:
+                for cb in self.on_ready:
+                    asyncio.create_task(cb(cap))  # noqa: RUF006 - fire and forget, callbacks swallow errors
         st.version, st.error = version, None
         st.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+    def recheck(self, cap: str) -> None:
+        """Probe one engine now (at most one probe in flight per engine), e.g. when a request found it down."""
+        if self.probes is None or cap in self._rechecking:
+            return
+        self._rechecking.add(cap)
+        task = asyncio.create_task(self.check(cap))
+        task.add_done_callback(lambda _: self._rechecking.discard(cap))
 
     async def check_all(self) -> None:
         await asyncio.gather(*(self.check(c) for c in self.status))
@@ -134,7 +148,7 @@ class Monitor:
     async def _loop(self) -> None:
         while True:
             await self.check_all()
-            await asyncio.sleep(10 if self.ready else 1)
+            await asyncio.sleep(2 if self.ready else 1)
 
     async def start(self) -> None:
         self.probes = Probes(self.s, read_secrets(self.s))

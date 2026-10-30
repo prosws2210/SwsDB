@@ -93,6 +93,12 @@ class SwsDB:
     def delete_collection(self, name: str) -> dict:
         return self._call("DELETE", f"/v1/collections/{name}")
 
+    # -- consistency
+
+    def reconcile(self, repair: bool = False, all_tenants: bool = False) -> dict:
+        """Compare the catalog with the vector and graph stores. With repair=True, queue the fixes."""
+        return self._call("POST", "/v1/admin/reconcile", {"dry_run": not repair, "all_tenants": all_tenants})
+
     # -- SQL
 
     def sql(self, query: str, params: Sequence[Any] | Mapping[str, Any] | None = None, *, read_only: bool = False,

@@ -30,6 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     q = sub.add_parser("sql", help="run one SQL statement")
     q.add_argument("query")
     q.add_argument("--read-only", action="store_true")
+    doc = sub.add_parser("doctor", help="check that the vector and graph stores agree with the catalog")
+    doc.add_argument("--repair", action="store_true", help="queue the fixes for what is found")
+    doc.add_argument("--all-tenants", action="store_true")
     c = sub.add_parser("cypher", help="run a Cypher query on a collection's graph")
     c.add_argument("collection")
     c.add_argument("query")
@@ -52,6 +55,18 @@ def main(argv: list[str] | None = None) -> int:
                 rows = [[c["name"], "yes" if c["vector"] else "", "yes" if c["graph"] else ""] for c in out]
                 print(_table(["collection", "vector", "graph"], rows) if rows else "no collections")
                 return 0
+        elif a.cmd == "doctor":
+            out = db.reconcile(repair=a.repair, all_tenants=a.all_tenants)
+            if not a.json:
+                for c in out["collections"]:
+                    issues = {k: v for k, v in c["found"].items() if v}
+                    state = ", ".join(f"{k} {v}" for k, v in issues.items()) or "consistent"
+                    print(f"  {c['tenant']}/{c['collection']:<20} {c['documents']:>6} documents  {state}")
+                verdict = "no issues" if not out["issues"] else (
+                    f"{out['issues']} issues, repairs queued" if a.repair else f"{out['issues']} issues "
+                    "(run with --repair to fix)")
+                print(f"swsdb doctor: {verdict} ({out['took_s']}s)")
+                return 0 if not out["issues"] or a.repair else 1
         elif a.cmd == "sql":
             out = db.sql(a.query, read_only=a.read_only)
             if not a.json:

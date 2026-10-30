@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     models_dir: Path = Path("/opt/swsdb/models")
     ingest_workers: int = Field(2, ge=1, le=32)
+    reconcile_interval_s: float = Field(600, ge=0)  # compare catalog and stores this often (0: only on request)
     max_upload_mb: int = Field(100, ge=1, le=4096)
 
     @field_validator("embeddings_api_key", "llm_api_key", mode="before")

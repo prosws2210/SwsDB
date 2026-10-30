@@ -76,6 +76,11 @@ class Query(BaseModel):
     graph_k: int = Field(5, ge=0, le=50)  # connected chunks added after the k search hits
 
 
+class Reconcile(BaseModel):
+    dry_run: bool = True
+    all_tenants: bool = False
+
+
 class Sql(BaseModel):
     query: str = Field(min_length=1, max_length=100_000)
     params: list[Any] | dict[str, Any] | None = None
@@ -120,9 +125,13 @@ class Engines:
             raise HTTPException(409, f"the {names[cap]} engine is not enabled in this swsdb "
                                      f"(SWSDB_ENGINES={','.join(self.s.engines)})")
         st = self.monitor.status.get(cap)
-        if st is None or st.state != "ready":
+        if st is None or st.state in ("starting", "failed"):
             raise HTTPException(503, f"the {names[cap]} engine is {st.state if st else 'unknown'}"
                                      + (f": {st.error}" if st and st.error else ""))
+        if st.state == "down":
+            # the monitor's view can be seconds old (the engine may already be back): try the engine itself, which
+            # answers 503 with the real error if it is still down, and refresh the monitor now
+            self.monitor.recheck(cap)
         return {"sql": self.app.state.sql, "vector": self.app.state.vector, "graph": self.app.state.graph}[cap]
 
     @property
@@ -142,8 +151,11 @@ class Engines:
 
     @property
     def docs(self) -> Documents:
+        """Uploads, deletes and listing need only Postgres (the source of truth): changes are queued and applied
+        to the vector and graph stores when they're available."""
         self.need("sql")
-        self.need("vector")
+        if not self.has("vector"):
+            self.need("vector")
         d = self.app.state.docs
         if d is None:
             raise HTTPException(503, "document processing is starting")
@@ -173,6 +185,7 @@ def router(require_key) -> APIRouter:
         if body.documents:
             if body.vector is not None:
                 raise HTTPException(422, "a documents collection embeds for you: leave out `vector`")
+            e.need("vector")
             if want_graph:
                 e.need("graph")
             await e.docs.create_collection(t, name, graph=want_graph)
@@ -322,9 +335,19 @@ def router(require_key) -> APIRouter:
                                      "documents only")
         if body.graph_hops and not e.has("graph"):
             raise HTTPException(409, "graph_hops needs the graph engine")
+        e.need("vector")
         return await e.docs.query(t, name, body.query, k=body.k, mode=body.mode, where=body.where,
                                   principals=body.principals, role=role, graph_hops=body.graph_hops,
                                   graph_k=body.graph_k)
+
+    # -------------------------------------------------------------- consistency
+
+    @r.post("/admin/reconcile", tags=["admin"])
+    async def reconcile(body: Reconcile, t: str = Depends(tenant), e: Engines = Depends(),
+                        _: str = Depends(admin)):
+        """Compare the catalog with the vector and graph stores and queue repairs (dry_run: only report)."""
+        e.need("vector")
+        return await e.docs.sync.reconcile(None if body.all_tenants else t, dry_run=body.dry_run)
 
     # -------------------------------------------------------------- SQL
 

@@ -56,15 +56,23 @@ async def _start_documents(app: FastAPI) -> None:
     delay = 1.0
     while True:  # e.g. Postgres restarting right now: keep trying, /readyz stays 503 meanwhile
         try:
-            await docs.start()
+            await docs.sync.start()
             break
         except Exception as e:
             app.state.docs_error = f"{type(e).__name__}: {e}"
             log.warning("document service not started yet: %s (retrying in %.0fs)", app.state.docs_error, delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30)
+    app.state.monitor.on_ready.append(docs.sync.engine_recovered)
     app.state.docs, app.state.docs_error = docs, None
     log.info("documents ready (embeddings %s)", embedder.name)
+
+
+async def _sync_stats(app: FastAPI) -> dict:
+    try:
+        return await app.state.docs.sync.stats()
+    except Exception as e:  # Postgres down: say so rather than fail the status call
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 def documents_expected(app: FastAPI) -> bool:
@@ -100,7 +108,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
         if starter:
             starter.cancel()
         if app.state.docs is not None:
-            await app.state.docs.stop()
+            await app.state.docs.sync.stop()
             await app.state.docs.embedder.close()
             if app.state.docs.extractor:
                 await app.state.docs.extractor.close()
@@ -199,6 +207,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
             "native_ports_exposed": s.expose_native,
             "role": role,
             "engines": {c: st.public() for c, st in m.status.items()},
+            **({"sync": await _sync_stats(request.app)} if request.app.state.docs is not None else {}),
         }
 
     app.include_router(v1_router(require_key))
