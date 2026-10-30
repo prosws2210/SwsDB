@@ -3,6 +3,27 @@
 swsdb is configured with environment variables. Secrets marked † can also be given as a file with the `_FILE`
 suffix (e.g. `SWSDB_API_KEY_FILE=/run/secrets/admin`).
 
+## A config file instead
+
+Every setting can also go in `/swsdb/config/swsdb.yaml` (or the file `SWSDB_CONFIG_FILE` names): lower case, without
+the `SWSDB_` prefix, with sections joined by `_`. Environment variables win over the file, and an unknown key stops the
+server with its name, so a typo doesn't go unnoticed.
+
+```yaml
+# docker run -v ./config:/swsdb/config:ro ...
+engines: [sql, vector, graph]
+rerank: true
+llm:
+  url: https://api.openai.com/v1
+  model: gpt-4.1-mini          # the key stays in SWSDB_LLM_API_KEY_FILE
+backup:
+  interval_h: 24
+  keep: 14
+  s3: {url: "https://s3.eu-west-1.amazonaws.com", bucket: acme-swsdb, region: eu-west-1}
+```
+
+Keep secrets out of the file: use the `_FILE` variables for them.
+
 ## Server
 
 | Variable | Default | Meaning |
@@ -17,6 +38,7 @@ suffix (e.g. `SWSDB_API_KEY_FILE=/run/secrets/admin`).
 | `SWSDB_QDRANT_URL`, `SWSDB_QDRANT_API_KEY` † | unset | use this Qdrant instead of the bundled one |
 | `SWSDB_FALKORDB_URL` † | unset | use this FalkorDB instead of the bundled one (`redis://` or `rediss://`) |
 | `SWSDB_EXPOSE_NATIVE` | `false` | make the engines' own ports (5432, 6333, 6379) listen beyond localhost |
+| `SWSDB_CONFIG_FILE` | `/swsdb/config/swsdb.yaml` | settings file (see above) |
 | `SWSDB_LOG_LEVEL` | `info` | `debug`, `info`, `warning` or `error` |
 | `SWSDB_ENGINE_START_TIMEOUT_S` | `120` | how long an engine may take to start before it's reported failed |
 

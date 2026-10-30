@@ -6,8 +6,10 @@ import os
 from functools import cached_property
 from pathlib import Path
 
+import yaml
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from .engines import parse_engines
 
@@ -28,12 +30,67 @@ def secrets_from_files(environ: dict | None = None) -> None:
                 raise ValueError(f"SWSDB_{name}_FILE: can't read {path}: {e.strerror}") from None
 
 
+CONFIG_FILE = Path("/swsdb/config/swsdb.yaml")
+
+
+def read_config_file(path: Path, fields: set[str]) -> dict:
+    """swsdb.yaml: the same settings as the SWSDB_* variables, lower case without the prefix. Sections are joined with
+    "_" (`backup: {s3: {bucket: x}}` is backup_s3_bucket), and `engines` may be a list. Unknown keys are an error."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"{path}: not valid YAML: {e}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping of settings")
+    flat: dict = {}
+
+    def walk(prefix: str, value) -> None:
+        if isinstance(value, dict):
+            for k, v in value.items():
+                walk(f"{prefix}_{k}" if prefix else str(k), v)
+        else:
+            flat[prefix.lower()] = value
+
+    walk("", data)
+    if "engines" in flat:
+        engines = flat.pop("engines")
+        flat["engines_raw"] = ",".join(engines) if isinstance(engines, list) else str(engines)
+    unknown = sorted(set(flat) - fields)
+    if unknown:
+        raise ValueError(f"{path}: unknown settings {', '.join(unknown)} (see docs/reference/configuration.md)")
+    return flat
+
+
+class _ConfigFile(PydanticBaseSettingsSource):
+    """Settings from SWSDB_CONFIG_FILE (default /swsdb/config/swsdb.yaml), below environment variables."""
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple:  # pragma: no cover - __call__ is used
+        return None, field_name, False
+
+    def __call__(self) -> dict:
+        path = Path(os.environ.get("SWSDB_CONFIG_FILE") or CONFIG_FILE)
+        if not path.is_file():
+            if os.environ.get("SWSDB_CONFIG_FILE"):
+                raise ValueError(f"SWSDB_CONFIG_FILE: {path} not found")
+            return {}
+        values = read_config_file(path, set(self.settings_cls.model_fields))
+        if "engines_raw" in values:  # the field reads SWSDB_ENGINES by alias
+            values["SWSDB_ENGINES"] = values.pop("engines_raw")
+        return values
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SWSDB_", extra="ignore", populate_by_name=True)
 
     def __init__(self, **values):
         secrets_from_files()
         super().__init__(**values)
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings,
+                                   file_secret_settings):
+        # explicit arguments, then SWSDB_* variables, then swsdb.yaml
+        return init_settings, env_settings, _ConfigFile(settings_cls), file_secret_settings
 
     engines_raw: str = Field("", alias="SWSDB_ENGINES")
     api_key: SecretStr | None = None

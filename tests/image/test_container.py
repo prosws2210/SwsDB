@@ -251,3 +251,19 @@ def test_a_second_container_on_the_same_volume_is_refused(volume, boxes):
     wait_exited(b2)
     assert "already used by another running swsdb container" in b2.logs()
     assert b.get("/readyz")[0] == 200  # the first one is untouched
+
+
+def test_a_mounted_config_file_configures_the_server(volume, boxes, tmp_path):
+    (tmp_path / "swsdb.yaml").write_text("engines: [sql, vector]\nrerank: true\nreconcile_interval_s: 0\n",
+                                         encoding="utf-8")
+    os.chmod(tmp_path / "swsdb.yaml", 0o644)
+    b = Box(volume, extra=["-v", f"{tmp_path}:/swsdb/config:ro"]).start()
+    boxes.append(b)
+    b.wait_ready()
+    assert set(b.get("/readyz")[1]["engines"]) == {"sql", "vector"}  # no graph engine started
+    from swsdb import SwsDB
+    kb = SwsDB(f"http://127.0.0.1:{b.port}").create_collection("kb", documents=True)
+    kb.add_text("a", "Refunds take five business days.")
+    kb.wait_ready("a")
+    r = kb.db._call("POST", "/v1/collections/kb/query", {"query": "refunds"})
+    assert r["reranked"] is True and r["hits"][0]["document"] == "a"

@@ -163,3 +163,21 @@ def test_sql_store_connects_locally_or_to_an_external_postgres():
 def test_external_engines_are_not_run_locally():
     s = Settings(qdrant_url="http://qdrant:6333", falkordb_url="redis://:pw@falkordb:6379")
     assert s.local_engines == ("sql",) and s.external("vector") and not s.external("sql")
+
+
+def test_a_config_file_sets_what_the_environment_does_not(tmp_path, monkeypatch):
+    cfg = tmp_path / "swsdb.yaml"
+    cfg.write_text("engines: [sql, vector]\nrerank: true\nbackup:\n  interval_h: 24\n  s3: {bucket: b, prefix: p}\n"
+                   "llm: {model: m}\n", encoding="utf-8")
+    monkeypatch.setenv("SWSDB_CONFIG_FILE", str(cfg))
+    monkeypatch.setenv("SWSDB_BACKUP_KEEP", "3")
+    monkeypatch.setenv("SWSDB_LLM_MODEL", "from-env")  # the environment wins
+    s = Settings()
+    assert s.engines == ("sql", "vector") and s.rerank and s.backup_interval_h == 24
+    assert s.backup_s3_bucket == "b" and s.backup_s3_prefix == "p" and s.backup_keep == 3 and s.llm_model == "from-env"
+    cfg.write_text("rernak: true\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown settings rernak"):
+        Settings()
+    monkeypatch.setenv("SWSDB_CONFIG_FILE", str(tmp_path / "missing.yaml"))
+    with pytest.raises(ValueError, match="not found"):
+        Settings()

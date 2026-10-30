@@ -3114,9 +3114,11 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.3" },
+    { name = "llama-index-core", marker = "extra == 'llama-index'", specifier = ">=0.12" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.10,<2" },
 ]
-provides-extras = ["mcp"]
+provides-extras = ["langchain", "llama-index", "mcp"]
 
 [[package]]
 name = "swsdb-server"
@@ -3135,6 +3137,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pypdf" },
     { name = "python-multipart" },
+    { name = "pyyaml" },
     { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -3164,6 +3167,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.6,<3" },
     { name = "pypdf", specifier = ">=5,<7" },
     { name = "python-multipart", specifier = ">=0.0.18" },
+    { name = "pyyaml", specifier = ">=6,<7" },
     { name = "redis", specifier = ">=5.2,<7" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32,<1" },
 ]
