@@ -46,3 +46,16 @@ def test_keys():
         assert c.get("/healthz").status_code == 200 and c.get("/readyz").status_code == 200
     with client(states) as c:  # no keys configured: local use, everything open
         assert c.get("/v1/status").status_code == 200
+
+
+def test_readyz_waits_for_the_document_service():
+    s = Settings()
+    app = create_app(s, FakeMonitor(s, {"sql": "ready", "vector": "ready", "graph": "ready"}),
+                     stores={"sql": object(), "vector": object()})
+    with TestClient(app) as c:
+        r = c.get("/readyz")
+        assert r.status_code == 503 and r.json()["documents"]["state"] == "starting"
+        app.state.docs = object()
+        r = c.get("/readyz")
+        assert r.status_code == 200 and r.json()["documents"]["state"] == "ready"
+        app.state.docs = None  # a stand-in, not a service to stop

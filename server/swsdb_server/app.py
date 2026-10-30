@@ -53,9 +53,22 @@ async def _start_documents(app: FastAPI) -> None:
                               s.llm_api_key.get_secret_value() if s.llm_api_key else None)
         log.info("entity extraction with %s", s.llm_model)
     docs = Documents(s, app.state.sql, app.state.vector, app.state.graph, embedder, extractor)
-    await docs.start()
-    app.state.docs = docs
+    delay = 1.0
+    while True:  # e.g. Postgres restarting right now: keep trying, /readyz stays 503 meanwhile
+        try:
+            await docs.start()
+            break
+        except Exception as e:
+            app.state.docs_error = f"{type(e).__name__}: {e}"
+            log.warning("document service not started yet: %s (retrying in %.0fs)", app.state.docs_error, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+    app.state.docs, app.state.docs_error = docs, None
     log.info("documents ready (embeddings %s)", embedder.name)
+
+
+def documents_expected(app: FastAPI) -> bool:
+    return app.state.sql is not None and app.state.vector is not None
 
 
 def create_app(settings: Settings | None = None, monitor: Monitor | None = None, stores: dict | None = None) -> FastAPI:
@@ -100,6 +113,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     app.state.settings = s
     app.state.monitor = monitor
     app.state.sql = app.state.vector = app.state.graph = app.state.docs = None
+    app.state.docs_error = None
     for k, v in (stores or {}).items():
         setattr(app.state, k, v)
 
@@ -161,9 +175,18 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     @app.get("/readyz", tags=["health"])
     async def readyz(request: Request) -> JSONResponse:
         m: Monitor = request.app.state.monitor
-        body = {"status": m.overall(), "engines": {c: {"engine": st.engine, "state": st.state}
-                                                   for c, st in m.status.items()}}
-        return JSONResponse(body, status_code=200 if m.ready else 503)
+        body: dict = {"status": m.overall(), "engines": {c: {"engine": st.engine, "state": st.state}
+                                                         for c, st in m.status.items()}}
+        ready = m.ready
+        if documents_expected(request.app):  # ready means documents can be accepted, not just engines answering
+            started = request.app.state.docs is not None
+            body["documents"] = {"state": "ready" if started else "starting",
+                                 **({"error": request.app.state.docs_error} if request.app.state.docs_error else {})}
+            if not started:
+                ready = False
+                if body["status"] == "ready":
+                    body["status"] = "starting"
+        return JSONResponse(body, status_code=200 if ready else 503)
 
     @app.get("/v1/status", tags=["health"])
     async def status(request: Request, role: str = Depends(require_key)) -> dict:
