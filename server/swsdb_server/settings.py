@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     llm_model: str | None = None  # unset: no entity extraction (the graph still holds document structure)
     llm_api_key: SecretStr | None = None
     answer_model: str | None = None  # cited answers; default: llm_model (no model: extractive answers)
+    rerank: bool = False  # re-rank search hits with the bundled cross-encoder unless a query says otherwise
     # entities for the graph: auto = the chat model when one is set, else names found in the text; llm | names | off
     entities: str = "auto"
     models_dir: Path = Path("/opt/swsdb/models")

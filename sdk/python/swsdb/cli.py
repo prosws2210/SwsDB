@@ -46,6 +46,26 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("collection")
     ask.add_argument("question")
     ask.add_argument("-k", type=int, default=5)
+    wh = sub.add_parser("webhooks", help="be told when documents are ready, fail or are deleted")
+    whs = wh.add_subparsers(dest="wh_cmd", required=True)
+    whc = whs.add_parser("create", help="register a URL (prints its signing secret once)")
+    whc.add_argument("url")
+    whc.add_argument("--events", help="comma-separated: document.ready,document.failed,document.deleted")
+    whc.add_argument("--collections", help="comma-separated (default: all)")
+    whs.add_parser("list", help="webhooks of the tenant, with delivery counts")
+    whd = whs.add_parser("deliveries", help="recent deliveries of one webhook")
+    whd.add_argument("id")
+    whp = whs.add_parser("ping", help="send a test event")
+    whp.add_argument("id")
+    whx = whs.add_parser("delete", help="remove a webhook")
+    whx.add_argument("id")
+    sub.add_parser("tenants", help="tenants and what they hold (a key from the server's environment)")
+    ev = sub.add_parser("eval", help="measure retrieval on a golden set and compare configurations")
+    ev.add_argument("collection")
+    ev.add_argument("set", help="the golden set's name")
+    ev.add_argument("--questions", help="JSON file [{query, relevant: [ids], answer}] to save as the set first")
+    ev.add_argument("-k", type=int, default=5)
+    ev.add_argument("--rerank", action="store_true", help="also compare re-ranked configurations")
     dm = sub.add_parser("demo", help="load a sample company handbook and ask it questions (a one-minute tour)")
     dm.add_argument("--collection", default="kestrel")
     m = sub.add_parser("mcp", help="run the MCP server for agents (stdio; needs pip install 'swsdb[mcp]')")
@@ -132,6 +152,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"created documents collection {a.collection}" + (" (with a knowledge graph)"
                                                                          if out["documents"]["graph"] else ""))
                 return 0
+        elif a.cmd == "webhooks":
+            return _webhooks(db, a)
+        elif a.cmd == "tenants":
+            out = db.tenants()
+            if not a.json:
+                rows = [[t["tenant"], ", ".join(t["collections"]) or "-", str(t["documents"]), str(t["keys"]),
+                         "yes" if t["sql"] else ""] for t in out]
+                print(_table(["tenant", "collections", "documents", "keys", "own sql role"], rows) if rows
+                      else "no tenants yet")
+                return 0
+        elif a.cmd == "eval":
+            return _eval(db, a)
         elif a.cmd == "demo":
             return _demo(db, a)
         elif a.cmd == "ingest":
@@ -213,6 +245,54 @@ def _print_answer(out: dict) -> None:
             page = f", page {p['page']}" if p.get("page") is not None else ""
             title = f" ({p['title']})" if p.get("title") else ""
             print(f"  [{p['n']}] {p['document']}{title}{page}")
+
+
+def _webhooks(db: SwsDB, a: argparse.Namespace) -> int:
+    split = (lambda s: [x.strip() for x in s.split(",") if x.strip()] if s else None)  # noqa: E731
+    if a.wh_cmd == "create":
+        w = db.create_webhook(a.url, split(a.events), split(a.collections))
+        print(f"webhook {w['id']} -> {w['url']} for {', '.join(w['events'])}")
+        print(f"signing secret (shown once): {w['secret']}")
+    elif a.wh_cmd == "list":
+        rows = [[w["id"], w["url"], ",".join(w["events"]), ",".join(w["collections"] or []) or "all",
+                 str(w["delivered"]), str(w["pending"]), str(w["failed"])] for w in db.webhooks()]
+        print(_table(["id", "url", "events", "collections", "delivered", "pending", "failed"], rows) if rows
+              else "no webhooks")
+    elif a.wh_cmd == "deliveries":
+        rows = [[str(d["id"]), d["event"], d["state"], str(d["attempts"]), str(d["last_status"] or ""),
+                 (d["last_error"] or "")[:60]] for d in db.webhook_deliveries(a.id)]
+        print(_table(["id", "event", "state", "attempts", "status", "error"], rows) if rows else "no deliveries")
+    elif a.wh_cmd == "ping":
+        print(f"queued ping {db.ping_webhook(a.id)['queued']}")
+    else:
+        db.delete_webhook(a.id)
+        print(f"deleted {a.id}")
+    return 0
+
+
+def _eval(db: SwsDB, a: argparse.Namespace) -> int:
+    col = db.collection(a.collection)
+    if a.questions:
+        cases = json.loads(Path(a.questions).read_text(encoding="utf-8"))
+        col.put_eval_set(a.set, cases)
+        print(f"saved {len(cases)} questions as {a.set!r}")
+    configs = None
+    if a.rerank:
+        graph = bool(col.info().get("graph"))
+        configs = [{"name": "hybrid", "mode": "hybrid"}, {"name": "hybrid+rerank", "mode": "hybrid", "rerank": True}]
+        if graph:
+            configs += [{"name": "hybrid+graph", "mode": "hybrid", "graph_hops": 1},
+                        {"name": "hybrid+graph+rerank", "mode": "hybrid", "graph_hops": 1, "rerank": True}]
+    run = col.evaluate(a.set, k=a.k, configs=configs)
+    if a.json:
+        print(json.dumps(run, indent=2))
+        return 0
+    rows = [[r["config"]["name"] + (" *" if r["config"]["name"] == run["best"] else ""),
+             *(f"{r['metrics'].get(m, 0):.3f}" for m in ("hit", "recall", "mrr", "ndcg", "answer_found")),
+             f"{r['metrics']['evidence']:.1f}", f"{r['metrics']['latency_p50_ms']:.0f} ms"] for r in run["results"]]
+    print(_table(["configuration", "hit", "recall", "MRR", "nDCG", "answer found", "passages", "p50"], rows))
+    print(f"\n{run['cases']} questions, top {run['k']}; best: {run['best']}")
+    return 0
 
 
 def _demo(db: SwsDB, a: argparse.Namespace) -> int:

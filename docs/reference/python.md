@@ -6,7 +6,7 @@ pip install "swsdb[mcp]"     # plus the MCP server
 ```
 
 ```python
-from swsdb import SwsDB, SwsDBError
+from swsdb import SwsDB, SwsDBError   # or AsyncSwsDB: the same methods, awaitable
 
 db = SwsDB(url="http://localhost:6464", api_key="...", tenant="acme", timeout=60)  # all optional (env defaults)
 ```
@@ -25,6 +25,8 @@ Every method raises `SwsDBError(status, code, message)` on failure (`status` 0 w
 | `db.delete_collection(name)` | |
 | `db.sql(query, params=None, read_only=False, timeout_s=30, max_rows=1000)` | `{"columns", "rows", "row_count", "truncated"}` |
 | `db.reconcile(repair=False, all_tenants=False)` | the consistency report |
+| `db.create_webhook(url, events=None, collections=None, secret=None)` / `db.webhooks()` / `db.webhook_deliveries(id)` / `db.ping_webhook(id)` / `db.delete_webhook(id)` | webhooks |
+| `db.tenants()` | tenants with their collections and counts |
 | `db.create_key(role="read", name=None, tenant=None)` / `db.keys()` / `db.revoke_key(id)` | managed keys |
 | `db.create_snapshot(name=None)` / `db.snapshots()` / `db.download_snapshot(snapshot_id, path)` | snapshots |
 | `db.upload_snapshot(path, snapshot_id=None)` / `db.restore_snapshot(snapshot_id, backup_first=True)` / `db.delete_snapshot(snapshot_id)` | |

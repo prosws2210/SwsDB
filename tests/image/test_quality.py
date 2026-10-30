@@ -26,8 +26,9 @@ K = 5
 FLOORS = {
     "all": {"hybrid": {"hit": 0.97, "recall": 0.95, "mrr": 0.95, "answer_found": 0.93},
             "dense": {"recall": 0.95}, "keyword": {"recall": 0.95},
-            "hybrid+graph": {"hit": 0.97, "recall": 0.97, "mrr": 0.95, "answer_found": 0.95}},
-    "multihop": {"hybrid+graph": {"recall": 0.95, "answer_found": 0.85}},
+            "hybrid+graph": {"hit": 0.97, "recall": 0.97, "mrr": 0.95, "answer_found": 0.95},
+            "hybrid+rerank": {"recall": 0.97, "mrr": 0.95}},
+    "multihop": {"hybrid+graph": {"recall": 0.95, "answer_found": 0.85}, "hybrid+rerank": {"recall": 0.9}},
 }
 
 
@@ -51,7 +52,9 @@ def report():
         configs = [{"name": "hybrid", "mode": "hybrid"}, {"name": "dense", "mode": "dense"},
                    {"name": "keyword", "mode": "sparse"},
                    {"name": "hybrid+graph", "mode": "hybrid", "graph_hops": 1, "graph_k": 3},
-                   {"name": "hybrid+graph2", "mode": "hybrid", "graph_hops": 2, "graph_k": 3}]
+                   {"name": "hybrid+graph2", "mode": "hybrid", "graph_hops": 2, "graph_k": 3},
+                   {"name": "hybrid+rerank", "mode": "hybrid", "rerank": True},
+                   {"name": "hybrid+graph+rerank", "mode": "hybrid", "graph_hops": 1, "graph_k": 3, "rerank": True}]
         out = {}
         for name in ("all", "multihop"):
             run = kb.evaluate(name, k=K, configs=configs)

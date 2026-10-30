@@ -39,10 +39,14 @@ hits = kb.query("refund", mode="sparse")                                  # keyw
 hits = kb.query("money back", mode="dense")                               # meaning only
 hits = kb.query("refunds", where={"team": "support", "year": [2025, 2026]})  # metadata: exact, lists mean "any of"
 hits = kb.query("who leads Orion", graph_hops=1, graph_k=3)               # + passages connected in the graph
+hits = kb.query("how long do refunds take", rerank=True)                  # re-ordered by a cross-encoder
 r = kb.answer("How long do refunds take?")                                # a short answer citing passages as [n]
 ```
 
-`where` filters on metadata fields; `{"document": [...]}` restricts to document ids. Every hit is checked against the
+`rerank=True` re-reads the top candidates together with the question using a small cross-encoder that is bundled in
+the image (`ms-marco-MiniLM-L-6-v2`). It is more precise and costs about 0.2 s per query on a laptop CPU. It's off by
+default; `SWSDB_RERANK=true` turns it on for every query, and evaluation can compare it (`{"rerank": true}` in a
+config). `where` filters on metadata fields; `{"document": [...]}` restricts to document ids. Every hit is checked against the
 catalog, so only a document's live version is ever returned, and nothing being deleted.
 
 ## Permissions

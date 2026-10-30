@@ -19,6 +19,7 @@ log = logging.getLogger("swsdb.embed")
 LOCAL_DENSE = "BAAI/bge-small-en-v1.5"
 LOCAL_DENSE_DIM = 384
 LOCAL_SPARSE = "Qdrant/bm25"
+LOCAL_RERANK = "Xenova/ms-marco-MiniLM-L-6-v2"  # cross-encoder, Apache-2.0, baked into the image
 
 
 @dataclass
@@ -44,6 +45,8 @@ class Embedder:
         self.batch = batch
         self._dense = None
         self._sparse = None
+        self._reranker = None
+        self.rerank_model = LOCAL_RERANK
         self._dim: int | None = LOCAL_DENSE_DIM if provider == "local" and self.model == LOCAL_DENSE else None
         self._lock = threading.Lock()  # one inference at a time: onnxruntime already uses every core
         self._queries_waiting = 0  # documents give way to queries between their small batches
@@ -62,6 +65,13 @@ class Embedder:
             log.info("loading embedding model %s", self.model)
             self._dense = TextEmbedding(self.model, cache_dir=self.cache_dir)
         return self._dense
+
+    def _load_reranker(self):
+        if self._reranker is None:
+            from fastembed.rerank.cross_encoder import TextCrossEncoder
+            log.info("loading re-ranking model %s", self.rerank_model)
+            self._reranker = TextCrossEncoder(self.rerank_model, cache_dir=self.cache_dir)
+        return self._reranker
 
     def _load_sparse(self):
         if self._sparse is None:
@@ -126,6 +136,16 @@ class Embedder:
             out += [d["embedding"] for d in data]
         self._dim = len(out[0])
         return out
+
+    async def rerank(self, query: str, texts: list[str]) -> list[float]:
+        """Cross-encoder relevance of each text to the query (a logit: higher is more relevant). Runs with a search's
+        priority, so document embedding gives way to it."""
+        if not texts:
+            return []
+
+        def score(batch: list[str], _query: bool) -> list[float]:
+            return [float(s) for s in self._load_reranker().rerank(query, batch, batch_size=32)]
+        return await asyncio.to_thread(self._run, score, texts, True)
 
     async def sparse(self, texts: list[str], query: bool = False) -> list[Sparse]:
         if not texts:

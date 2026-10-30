@@ -24,6 +24,9 @@ skips TLS certificate checks (self-signed test servers only).
 | `swsdb snapshot create [--name N] [-o FILE]` | snapshot every engine (and download it) |
 | `swsdb snapshot list` / `download ID [-o FILE]` / `delete ID` | manage snapshots |
 | `swsdb snapshot restore ID\|FILE [--no-backup] [-y]` | replace all data with a snapshot |
+| `swsdb eval NAME SET [--questions FILE] [-k 5] [--rerank]` | compare configurations on a golden set |
+| `swsdb webhooks create URL [--events ...]` / `list` / `deliveries ID` / `ping ID` / `delete ID` | webhooks |
+| `swsdb tenants` | tenants and what they hold (environment admin key) |
 | `swsdb keys create [--role read\|admin] [--name N]` | a key for `--tenant`, printed once |
 | `swsdb keys list [--all-tenants]` / `keys revoke ID` | manage keys |
 | `swsdb mcp [--read-write] [--http PORT]` | run the MCP server (stdio, or HTTP); needs `swsdb[mcp]` |

@@ -76,6 +76,7 @@ fails below the floors. Ranges are over two runs.
 | dense | 1.000 | 0.989 | 0.966 | 0.961 | 0.977 |
 | keyword | 1.000 | 0.989 | 0.989 | 0.976 | 0.977 |
 | hybrid + graph | 1.000 | **1.000** | 0.977–1.000 | 0.975–0.990 | **1.000** |
+| hybrid + re-rank | 1.000 | **1.000** | 1.000 | 0.989 | **1.000** |
 
 **The 7 multi-hop questions** (with 7 questions, one near-tie in the fused ranking moves a number by 0.07):
 
@@ -83,10 +84,14 @@ fails below the floors. Ranges are over two runs.
 |---|---|---|---|
 | hybrid, top 5 | 5 | 0.929 | 0.857 |
 | hybrid + graph, top 5 | 8 | **1.000** | **1.000** |
+| hybrid + re-rank, top 5 | 5 | **1.000** | **1.000** |
 | hybrid, top 2 | 2 | 0.71–0.79 | 0.43–0.57 |
 | hybrid top 1 + 1 graph passage | 2 | **0.79–0.86** | **0.714** |
 | hybrid, top 4 | 4 | 0.929 | 0.857 |
 | hybrid top 1 + up to 3 graph passages | 3.1 | **1.000** | **1.000** |
+
+Re-ranking 20 candidates with the bundled cross-encoder also lifts recall to 1.000, without extra passages, at about
+240 ms per question on this CPU (hybrid alone: 21 ms). That is why it is opt-in.
 
 The graph adds passages, so the fair comparison is at the same number of passages. There, following the graph beats
 taking more search hits: with two passages, the answer phrase is found for 71% of multi-hop questions instead of 43–57%,

@@ -79,6 +79,7 @@ class Query(BaseModel):
     principals: list[str] | None = None  # who is asking, e.g. ["user:42", "group:support"] (admin key only)
     graph_hops: int | None = Field(None, ge=0, le=2)  # default: 1 when the collection has a graph
     graph_k: int = Field(5, ge=0, le=50)  # connected chunks added after the k search hits
+    rerank: bool | None = None  # re-rank with the cross-encoder (default: SWSDB_RERANK)
 
 
 class Ask(BaseModel):
@@ -89,6 +90,7 @@ class Ask(BaseModel):
     principals: list[str] | None = None  # who is asking (admin key only)
     graph_hops: int | None = Field(None, ge=0, le=2)
     graph_k: int = Field(3, ge=0, le=20)
+    rerank: bool | None = None
     generate: bool = True  # False: always the extractive answer, even with a model configured
 
 
@@ -108,6 +110,7 @@ class EvalConfig(BaseModel):
     graph_hops: int = Field(0, ge=0, le=2)
     graph_k: int = Field(5, ge=0, le=50)
     where: dict[str, Any] | None = None
+    rerank: bool = False
 
 
 class EvalRun(BaseModel):
@@ -120,6 +123,13 @@ class EvalRun(BaseModel):
 class Reconcile(BaseModel):
     dry_run: bool = True
     all_tenants: bool = False
+
+
+class NewWebhook(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+    events: list[str] = Field(default_factory=lambda: ["document.ready", "document.failed", "document.deleted"])
+    collections: list[str] | None = None  # default: every collection of the tenant
+    secret: str | None = Field(None, min_length=16, max_length=200)  # default: generated, returned once
 
 
 class NewKey(BaseModel):
@@ -434,7 +444,7 @@ def router(caller) -> APIRouter:
         e.need("vector")
         return await e.docs.query(t, name, body.query, k=body.k, mode=body.mode, where=body.where,
                                   principals=body.principals, role=role, graph_hops=body.graph_hops,
-                                  graph_k=body.graph_k)
+                                  graph_k=body.graph_k, rerank=body.rerank)
 
     @r.post("/collections/{name}/answer", tags=["documents"])
     async def answer(body: Ask, request: Request, name: str = Depends(collection_name), t: str = Depends(tenant),
@@ -448,7 +458,7 @@ def router(caller) -> APIRouter:
         t0 = time.perf_counter()
         found = await e.docs.query(t, name, body.question, k=body.k, mode=body.mode, where=body.where,
                                    principals=body.principals, role=role, graph_hops=body.graph_hops,
-                                   graph_k=body.graph_k)
+                                   graph_k=body.graph_k, rerank=body.rerank)
         hits = found["hits"]
         retrieval_ms = round((time.perf_counter() - t0) * 1000, 1)
         model, mode, note, text = None, "extractive", None, ""
@@ -573,6 +583,68 @@ def router(caller) -> APIRouter:
                                _: Caller = Depends(global_admin)):
         """Replace every engine's data with the snapshot's. By default the current data is snapshotted first."""
         return await request.app.state.snapshots.restore(sid, backup_first=body.backup_first if body else True)
+
+    # -------------------------------------------------------------- webhooks
+
+    @r.post("/webhooks", tags=["webhooks"], status_code=201)
+    async def create_webhook(body: NewWebhook, t: str = Depends(tenant), e: Engines = Depends(),
+                             _: str = Depends(admin)):
+        """Be told when documents become searchable, fail or are deleted. The secret signs every request and is
+        shown only now."""
+        for c in body.collections or []:
+            check("collection", c)
+        return await e.docs.sync.webhooks.create(t, body.url, body.events, body.collections, body.secret)
+
+    @r.get("/webhooks", tags=["webhooks"])
+    async def list_webhooks(t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(admin)):
+        return {"webhooks": await e.docs.sync.webhooks.list(t)}
+
+    @r.delete("/webhooks/{wid}", tags=["webhooks"])
+    async def delete_webhook(wid: str, t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(admin)):
+        if not await e.docs.sync.webhooks.delete(t, wid):
+            raise NotFound(f"webhook {wid!r} not found")
+        return {"deleted": wid}
+
+    @r.get("/webhooks/{wid}/deliveries", tags=["webhooks"])
+    async def webhook_deliveries(wid: str, limit: int = 50, t: str = Depends(tenant), e: Engines = Depends(),
+                                 _: str = Depends(admin)):
+        return {"deliveries": await e.docs.sync.webhooks.deliveries(t, wid, max(1, min(limit, 500)))}
+
+    @r.post("/webhooks/{wid}/ping", tags=["webhooks"])
+    async def ping_webhook(wid: str, t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(admin)):
+        """Send a `ping` event, to check the receiving end."""
+        return await e.docs.sync.webhooks.ping(t, wid)
+
+    # -------------------------------------------------------------- tenants
+
+    @r.get("/admin/tenants", tags=["admin"])
+    async def tenants(e: Engines = Depends(), c: Caller = Depends(caller), _: str = Depends(admin)):
+        """Every tenant that holds something (collections in any store, documents, SQL, keys), with counts."""
+        if not c.is_global:
+            raise HTTPException(403, "listing tenants needs a key from the environment")
+        out: dict[str, dict] = {}
+
+        def entry(t: str) -> dict:
+            return out.setdefault(t, {"tenant": t, "collections": set(), "documents": 0, "keys": 0, "sql": False})
+        names = []
+        if e.has("vector"):
+            names += [x["name"] for x in (await e.vector._call("GET", "/collections"))["result"]["collections"]]
+        if e.has("graph"):
+            names += [g.decode() if isinstance(g, bytes) else g for g in await e.graph._cmd("GRAPH.LIST")]
+        for n in names:
+            if n.startswith("sw_") and "__" in n:
+                t, coll = n[3:].split("__", 1)
+                entry(t)["collections"].add(coll)
+        if e.has("sql"):
+            sql = e.sql
+            for row in await sql.rows("SELECT tenant, count(*) AS n FROM swsdb.documents GROUP BY tenant"):
+                entry(row["tenant"])["documents"] = row["n"]
+            for row in await sql.rows("SELECT tenant, count(*) AS n FROM swsdb.api_keys WHERE revoked_at IS NULL "
+                                      "GROUP BY tenant"):
+                entry(row["tenant"])["keys"] = row["n"]
+            for row in await sql.rows("SELECT tenant FROM swsdb.sql_tenants"):
+                entry(row["tenant"])["sql"] = True
+        return {"tenants": [{**v, "collections": sorted(v["collections"])} for _, v in sorted(out.items())]}
 
     # -------------------------------------------------------------- managed API keys
 

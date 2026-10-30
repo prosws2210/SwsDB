@@ -84,6 +84,19 @@ schema. `params` are `%s` (a list) or `%(name)s` (an object) placeholders.
 | `POST /v1/admin/snapshots/{id}/restore` | `{"backup_first": true}` replace all data with it |
 | `DELETE /v1/admin/snapshots/{id}` | delete |
 
+## Webhooks
+
+| | |
+|---|---|
+| `POST /v1/webhooks` | `{"url", "events", "collections", "secret"}` → the webhook and its secret, once |
+| `GET /v1/webhooks` | the tenant's webhooks with delivered, pending and failed counts |
+| `GET /v1/webhooks/{id}/deliveries` | recent deliveries |
+| `POST /v1/webhooks/{id}/ping` | send a `ping` event |
+| `DELETE /v1/webhooks/{id}` | remove |
+
+See [Webhooks](../guides/webhooks.md). `GET /v1/admin/tenants` (environment admin key) lists every tenant with its
+collections, documents, keys and SQL role.
+
 ## MCP
 
 `/mcp` (read-only tools) and `/mcp/rw` (read-write, admin key) speak MCP over streamable HTTP. See [MCP server](../guides/mcp.md).

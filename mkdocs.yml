@@ -51,6 +51,7 @@ nav:
       - Web console: guides/console.md
       - Evaluation: guides/evaluation.md
       - MCP server: guides/mcp.md
+      - Webhooks: guides/webhooks.md
       - Security and tenants: guides/security.md
       - Snapshots, restore and upgrades: guides/backups.md
       - Operations: guides/operations.md

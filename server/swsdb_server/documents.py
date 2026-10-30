@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import shutil
 import time
 import uuid
@@ -257,14 +258,16 @@ class Documents:
     _filter = filter  # kept for callers and tests from before the rename
 
     async def query(self, tenant: str, collection: str, text: str, *, k: int, mode: str, where: dict | None,
-                    principals: list[str] | None, role: str, graph_hops: int | None, graph_k: int = 5) -> dict:
+                    principals: list[str] | None, role: str, graph_hops: int | None, graph_k: int = 5,
+                    rerank: bool | None = None) -> dict:
         """The top `k` search hits, then up to `graph_k` chunks connected to them in the graph (marked via=graph).
         Every hit is checked against the catalog: only the document's live version, never one being deleted."""
         t_start = time.perf_counter()
         coll = await self.collection(tenant, collection)
         key = engine_name(tenant, collection)
         flt = self.filter(principals, role, where)
-        fetch = k * 2  # head-room for hits the catalog check drops
+        rerank = self.s.rerank if rerank is None else rerank
+        fetch = max(k * 4, 20) if rerank else k * 2  # head-room for the catalog check, and candidates to re-rank
         pre = max(fetch * 2, 20)
         dense_q = (await self.embedder.dense([text], query=True))[0] if mode in ("hybrid", "dense") else None
         sparse_q = (await self.embedder.sparse([text], query=True))[0] if mode in ("hybrid", "sparse") else None
@@ -278,7 +281,16 @@ class Documents:
         else:
             body = {"query": dense_q if mode == "dense" else sp, "using": mode, "limit": fetch, "filter": flt,
                     "with_payload": True}
-        hits = (await self.current([self._hit(p, p["score"], mode) for p in await self.vector.query(key, body)]))[:k]
+        hits = await self.current([self._hit(p, p["score"], mode) for p in await self.vector.query(key, body)])
+        if rerank and hits:
+            # a cross-encoder reads question and passage together: slower than vectors, often more precise
+            logits = await self.embedder.rerank(text, [f"{h['heading']}\n{h['text']}" if h.get("heading")
+                                                       else (h["text"] or "") for h in hits])
+            for h, z in zip(hits, logits, strict=True):
+                h["fusion_score"] = h["score"]
+                h["score"] = round(1 / (1 + math.exp(-z)), 6)
+            hits.sort(key=lambda h: h["score"], reverse=True)
+        hits = hits[:k]
 
         hops = (1 if coll["graph"] else 0) if graph_hops is None else graph_hops
         graph_info: dict[str, Any] = {"used": False}
@@ -295,7 +307,7 @@ class Documents:
         took = time.perf_counter() - t_start
         observe.QUERY_SECONDS.labels(mode, "yes" if graph_info["used"] else "no").observe(took)
         observe.QUERY_HITS.observe(len(hits))
-        return {"hits": hits, "graph": graph_info, "took_ms": round(took * 1000, 1)}
+        return {"hits": hits, "graph": graph_info, "reranked": bool(rerank), "took_ms": round(took * 1000, 1)}
 
     async def current(self, hits: list[dict]) -> list[dict]:
         """Keep hits from each document's live version only, and none from documents being deleted."""

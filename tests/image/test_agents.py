@@ -208,3 +208,17 @@ def test_the_quickstart_commands(box):
     assert "26" in asked and "leave-policy.md" in asked
     found = cli(box, "search", "hb", "laptop replacement", "-k", "3")
     assert found.startswith("[1] hardware.md")
+
+
+def test_eval_and_tenants_from_the_cli(box, tmp_path):
+    import json as _json
+    from pathlib import Path
+    data = _json.loads((Path(__file__).resolve().parents[2] / "benchmarks" / "datasets" / "kestrel.json")
+                       .read_text(encoding="utf-8"))
+    qs = tmp_path / "q.json"
+    qs.write_text(_json.dumps([{k: q[k] for k in ("query", "relevant", "answer")} for q in data["questions"][:6]]),
+                  encoding="utf-8")
+    out = cli(box, "eval", "kestrel", "cli-set", "--questions", str(qs), "--rerank")
+    assert "saved 6 questions" in out and "hybrid+rerank" in out and "best:" in out
+    tenants = cli(box, "tenants")
+    assert "default" in tenants and "kestrel" in tenants

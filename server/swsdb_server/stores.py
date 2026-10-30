@@ -144,6 +144,20 @@ MIGRATIONS: list[str] = [
     REVOKE ALL ON SCHEMA public FROM PUBLIC;
     ALTER DEFAULT PRIVILEGES FOR ROLE swsdb_app REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
     """,
+    # 6: webhooks. Events are inserted in the transaction of the change they describe and delivered by a worker.
+    """
+    CREATE TABLE swsdb.webhooks (
+      id text PRIMARY KEY, tenant text NOT NULL, url text NOT NULL, events text[] NOT NULL, collections text[],
+      secret text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), disabled_at timestamptz);
+    CREATE INDEX webhooks_tenant ON swsdb.webhooks (tenant);
+    CREATE TABLE swsdb.webhook_events (
+      id bigserial PRIMARY KEY, webhook_id text NOT NULL REFERENCES swsdb.webhooks ON DELETE CASCADE,
+      event text NOT NULL, payload jsonb NOT NULL, attempts int NOT NULL DEFAULT 0,
+      next_attempt_at timestamptz NOT NULL DEFAULT now(), locked_until timestamptz, delivered_at timestamptz,
+      failed_at timestamptz, last_status int, last_error text, created_at timestamptz NOT NULL DEFAULT now());
+    CREATE INDEX webhook_events_due ON swsdb.webhook_events (next_attempt_at)
+      WHERE delivered_at IS NULL AND failed_at IS NULL;
+    """,
 ]
 
 TENANT_ROLE_PREFIX = "swsdb_t_"  # bootstrap's pg_ident map lets the server log in as any role with this prefix

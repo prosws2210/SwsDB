@@ -29,6 +29,7 @@ suffix (e.g. `SWSDB_API_KEY_FILE=/run/secrets/admin`).
 | `SWSDB_LLM_MODEL` | unset | the chat model. Unset: entities are linked by name, and answers are extractive |
 | `SWSDB_LLM_API_KEY` † | unset | key for the chat endpoint |
 | `SWSDB_ANSWER_MODEL` | `SWSDB_LLM_MODEL` | a different model for cited answers |
+| `SWSDB_RERANK` | `false` | re-rank search hits with the bundled cross-encoder unless a query says otherwise |
 | `SWSDB_ENTITIES` | `auto` | entities for the graph: `auto` (the chat model if set, else names in the text), `llm`, `names` or `off` |
 | `SWSDB_INGEST_WORKERS` | `2` | documents indexed at the same time |
 | `SWSDB_MAX_UPLOAD_MB` | `100` | largest accepted upload |

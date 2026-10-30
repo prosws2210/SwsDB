@@ -9,7 +9,8 @@
 
 from __future__ import annotations
 
+from .aio import AsyncCollection, AsyncSwsDB
 from .client import Collection, SwsDB, SwsDBError
 
-__all__ = ["Collection", "SwsDB", "SwsDBError"]
+__all__ = ["AsyncCollection", "AsyncSwsDB", "Collection", "SwsDB", "SwsDBError"]
 __version__ = "0.1.0"

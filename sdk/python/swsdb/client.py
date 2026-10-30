@@ -158,6 +158,33 @@ class SwsDB:
     def delete_snapshot(self, snapshot_id: str) -> dict:
         return self._call("DELETE", f"/v1/admin/snapshots/{_seg(snapshot_id)}")
 
+    # -- webhooks (document.ready, document.failed, document.deleted)
+
+    def create_webhook(self, url: str, events: Sequence[str] | None = None,
+                       collections: Sequence[str] | None = None, secret: str | None = None) -> dict:
+        """Register a URL to be POSTed signed events. The result's "secret" (for checking signatures) is shown once."""
+        body: dict[str, Any] = {"url": url, "collections": list(collections) if collections else None,
+                                "secret": secret}
+        if events:
+            body["events"] = list(events)
+        return self._call("POST", "/v1/webhooks", body)
+
+    def webhooks(self) -> list[dict]:
+        return self._call("GET", "/v1/webhooks")["webhooks"]
+
+    def webhook_deliveries(self, webhook_id: str, limit: int = 50) -> list[dict]:
+        return self._call("GET", f"/v1/webhooks/{_seg(webhook_id)}/deliveries?limit={limit}")["deliveries"]
+
+    def ping_webhook(self, webhook_id: str) -> dict:
+        return self._call("POST", f"/v1/webhooks/{_seg(webhook_id)}/ping")
+
+    def delete_webhook(self, webhook_id: str) -> dict:
+        return self._call("DELETE", f"/v1/webhooks/{_seg(webhook_id)}")
+
+    def tenants(self) -> list[dict]:
+        """Every tenant holding something, with its collections and counts (a key from the environment)."""
+        return self._call("GET", "/v1/admin/tenants")["tenants"]
+
     # -- API keys for one tenant
 
     def create_key(self, role: str = "read", name: str | None = None, tenant: str | None = None) -> dict:
@@ -279,12 +306,16 @@ class Collection:
             time.sleep(poll)
 
     def query(self, query: str, k: int = 10, *, mode: str = "hybrid", where: Mapping[str, Any] | None = None,
-              principals: Sequence[str] | None = None, graph_hops: int | None = None, graph_k: int = 5) -> list[dict]:
+              principals: Sequence[str] | None = None, graph_hops: int | None = None, graph_k: int = 5,
+              rerank: bool | None = None) -> list[dict]:
         """Hybrid retrieval over the documents: the top `k` hits, then up to `graph_k` connected chunks
-        (via="graph", with graph_path). `principals` (admin key only) is who is asking, e.g. ["user:42"]."""
+        (via="graph", with graph_path). `principals` (admin key only) is who is asking, e.g. ["user:42"].
+        `rerank` re-orders the hits with a cross-encoder (default: the server's SWSDB_RERANK)."""
         body = {"query": query, "k": k, "mode": mode, "where": dict(where) if where else None,
                 "principals": list(principals) if principals is not None else None, "graph_hops": graph_hops,
                 "graph_k": graph_k}
+        if rerank is not None:
+            body["rerank"] = rerank
         return self.db._call("POST", f"/v1/collections/{self.name}/query", body)["hits"]
 
     def answer(self, question: str, k: int = 5, *, mode: str = "hybrid", where: Mapping[str, Any] | None = None,

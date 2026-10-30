@@ -23,7 +23,7 @@ import psycopg
 import redis.exceptions
 from psycopg_pool import PoolTimeout
 
-from . import observe
+from . import observe, webhooks
 from .embed import EmbeddingError
 from .extract import ExtractionError
 from .names import engine_name
@@ -62,6 +62,7 @@ class Sync:
         self._wake = asyncio.Event()
         self.reconciler: asyncio.Task | None = None
         self.last_reconcile: dict | None = None
+        self.webhooks = webhooks.Webhooks(docs)
         self._open = asyncio.Event()  # cleared while paused: workers finish what they hold and claim nothing new
         self._open.set()
         self._busy = 0
@@ -82,6 +83,8 @@ class Sync:
                         for i in range(self.d.s.ingest_workers)]
         if self.d.s.reconcile_interval_s > 0:
             self.reconciler = asyncio.create_task(self._reconcile_loop(), name="swsdb-reconcile")
+        self.webhooks = webhooks.Webhooks(self.d)  # a fresh client: stop() closed the last one
+        self.webhooks.start()
 
     async def pause(self, timeout_s: float = 120) -> None:
         """Hold the workers: the stores stop changing once the changes in progress are finished (snapshots)."""
@@ -98,6 +101,7 @@ class Sync:
         self.wake()
 
     async def stop(self) -> None:
+        await self.webhooks.stop()
         tasks = [*self.workers, *([self.reconciler] if self.reconciler else [])]
         for t in tasks:
             t.cancel()
@@ -218,10 +222,16 @@ class Sync:
         else:
             log.error("index %s v%d failed permanently: %s", doc, row["version"], msg)
             async with self.d.sql.pool.connection() as conn, conn.transaction():
-                await conn.execute("UPDATE swsdb.documents SET status = 'failed', error = %s, updated_at = now()"
-                                   " WHERE id = %s AND version = %s AND status <> 'deleting'",
-                                   [msg, doc, row["version"]])
+                cur = await conn.execute(
+                    "UPDATE swsdb.documents SET status = 'failed', error = %s, updated_at = now() WHERE id = %s "
+                    "AND version = %s AND status <> 'deleting' RETURNING tenant, collection, external_id",
+                    [msg, doc, row["version"]])
+                failed = await cur.fetchone()
+                if failed:
+                    await webhooks.emit(conn, failed[0], failed[1], "document.failed",
+                                        {"document": failed[2], "version": row["version"], "error": msg})
                 await conn.execute("DELETE FROM swsdb.outbox WHERE id = %s", [row["id"]])
+            self.webhooks.wake()
 
     # ------------------------------------------------------------------ operations (idempotent)
 
@@ -412,6 +422,10 @@ class Sync:
             if await cur.fetchone() is None:
                 return  # superseded or being deleted meanwhile: that change's own row finishes the job
             await conn.execute("DELETE FROM swsdb.chunks WHERE document_id = %s AND version <> %s", [doc_id, version])
+            await webhooks.emit(conn, doc["tenant"], doc["collection"], "document.ready",
+                                {"document": doc["external_id"], "version": version, "title": doc["title"],
+                                 "chunks": n_chunks, "entities": n_entities})
+        self.webhooks.wake()
         await d.vector.delete_where(key, {"must": [doc_f], "must_not": [ver_f]})
         folder = d.file(doc["tenant"], doc["collection"], doc_id, version, doc["kind"]).parent
         for old in folder.glob("v*"):
@@ -432,7 +446,13 @@ class Sync:
         if coll["graph"] and d.graph:
             await self.remove_graph(key, doc_id)
         await asyncio.to_thread(shutil.rmtree, d.s.files_dir / doc["tenant"] / doc["collection"] / doc_id, True)
-        await d.rows("DELETE FROM swsdb.documents WHERE id = %s AND status = 'deleting'", [doc_id])
+        async with d.sql.pool.connection() as conn, conn.transaction():
+            cur = await conn.execute("DELETE FROM swsdb.documents WHERE id = %s AND status = 'deleting' RETURNING id",
+                                     [doc_id])
+            if await cur.fetchone():
+                await webhooks.emit(conn, doc["tenant"], doc["collection"], "document.deleted",
+                                    {"document": doc["external_id"], "version": version})
+        self.webhooks.wake()
         log.info("deleted %s/%s/%s", doc["tenant"], doc["collection"], doc["external_id"])
 
     async def remove_graph(self, key: str, doc_id: str) -> None:

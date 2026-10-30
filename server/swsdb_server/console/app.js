@@ -512,9 +512,12 @@ view.search = async (root, _arg, actions) => {
   const hops = h("select", { "aria-label": "Graph" }, [["", "Graph: auto"], ["0", "No graph"], ["1", "Graph 1 hop"], ["2", "Graph 2 hops"]]
     .map(([v, l]) => h("option", { value: v }, l)));
   const principals = h("input", { placeholder: "Ask as… user:42, group:hr", class: "grow", "aria-label": "Principals" });
+  const rerank = h("select", { "aria-label": "Re-rank", title: "Re-order hits with a cross-encoder: often more precise, slower" },
+    [["", "Re-rank: default"], ["true", "Re-rank: on"], ["false", "Re-rank: off"]].map(([v, l]) => h("option", { value: v }, l)));
 
   function params() {
     const body = { k: Number(k.value), mode: mode.value };
+    if (rerank.value !== "") body.rerank = rerank.value === "true";
     if (hops.value !== "") body.graph_hops = Number(hops.value);
     const p = principals.value.split(",").map((x) => x.trim()).filter(Boolean);
     if (p.length) body.principals = p;
@@ -561,7 +564,7 @@ view.search = async (root, _arg, actions) => {
   fill(root,
     h("div", { class: "search-hero" }, icon("search", "lead"), q, btn("Search", search, { title: "Passages only (Shift+Enter)" }),
       btn("Ask", ask, { kind: "primary", ico: "spark", title: "A cited answer (Enter)" })),
-    h("div", { class: "row" }, mode, k, hops, principals),
+    h("div", { class: "row" }, mode, k, hops, rerank, principals),
     h("div", { class: "chips" }, h("span", { class: "tiny muted" }, "Try"),
       ["What is the refund policy?", "Where do orders ship from?", "Who leads the project?"].map(example)),
     results);

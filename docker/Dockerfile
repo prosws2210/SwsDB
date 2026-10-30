@@ -19,7 +19,8 @@ COPY sdk/python/ /tmp/sdk/
 RUN /opt/swsdb/venv/bin/pip install --no-deps /tmp/server /tmp/sdk \
  && find /opt/swsdb/venv -name '__pycache__' -prune -exec rm -rf {} +
 # The default embedding models, baked in so swsdb works offline with no key
-RUN /opt/swsdb/venv/bin/python -c "from fastembed import TextEmbedding, SparseTextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5', cache_dir='/opt/swsdb/models'); SparseTextEmbedding('Qdrant/bm25', cache_dir='/opt/swsdb/models')"  && find /opt/swsdb/models -name '*.lock' -delete
+# (and the cross-encoder for optional re-ranking, loaded only when a query asks for it)
+RUN /opt/swsdb/venv/bin/python -c "from fastembed import TextEmbedding, SparseTextEmbedding; from fastembed.rerank.cross_encoder import TextCrossEncoder; TextEmbedding('BAAI/bge-small-en-v1.5', cache_dir='/opt/swsdb/models'); SparseTextEmbedding('Qdrant/bm25', cache_dir='/opt/swsdb/models'); TextCrossEncoder('Xenova/ms-marco-MiniLM-L-6-v2', cache_dir='/opt/swsdb/models')"  && find /opt/swsdb/models -name '*.lock' -delete
 
 # ------------------------------------------------------------------ runtime
 FROM ${PYTHON_IMAGE}
