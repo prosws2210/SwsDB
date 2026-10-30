@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>swsdb console</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside class="side">
+    <div class="brand"><span class="logo">sw</span><span>swsdb</span></div>
+    <nav id="nav">
+      <a data-page="overview" href="#overview">Overview</a>
+      <a data-page="collections" href="#collections">Collections</a>
+      <a data-page="search" href="#search">Search</a>
+      <a data-page="graph" href="#graph">Graph</a>
+      <a data-page="eval" href="#eval">Evaluation</a>
+      <a data-page="doctor" href="#doctor">Doctor</a>
+    </nav>
+    <div class="side-foot">
+      <label>Tenant <input id="tenant" value="default" spellcheck="false"></label>
+      <button id="key-btn" class="ghost">API key</button>
+      <div id="version" class="muted"></div>
+    </div>
+  </aside>
+  <main>
+    <header class="top">
+      <h1 id="title">Overview</h1>
+      <div id="health" class="health"><span class="dot"></span><span>checking</span></div>
+    </header>
+    <div id="error" class="banner hidden"></div>
+    <section id="page"></section>
+  </main>
+  <dialog id="key-dialog">
+    <form method="dialog">
+      <h2>API key</h2>
+      <p class="muted">Needed when the server sets SWSDB_API_KEY. Kept in this browser tab only.</p>
+      <input id="key-input" type="password" autocomplete="off" placeholder="api key">
+      <div class="row end"><button value="cancel" class="ghost">Cancel</button><button id="key-save" value="ok">Save</button></div>
+    </form>
+  </dialog>
+  <script src="app.js" type="module"></script>
+</body>
+</html>

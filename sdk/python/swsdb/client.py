@@ -215,3 +215,19 @@ class Collection:
                 "principals": list(principals) if principals is not None else None, "graph_hops": graph_hops,
                 "graph_k": graph_k}
         return self.db._call("POST", f"/v1/collections/{self.name}/query", body)["hits"]
+
+    def diagnose(self, id: str) -> dict:
+        """Why a document is or isn't searchable: catalog, pending changes, vectors and graph, with a verdict."""
+        return self.db._call("GET", f"/v1/collections/{self.name}/diagnose/{id}")
+
+    def put_eval_set(self, name: str, cases: Sequence[Mapping[str, Any]]) -> dict:
+        """A golden set: [{"query": ..., "relevant": [document ids], "answer": optional phrase}]."""
+        body = {"cases": [dict(c) for c in cases]}
+        return self.db._call("PUT", f"/v1/collections/{self.name}/eval/sets/{name}", body)
+
+    def evaluate(self, set_name: str, k: int = 5, configs: Sequence[Mapping[str, Any]] | None = None) -> dict:
+        """Ask every question under each configuration (default: hybrid, dense, keyword, hybrid+graph)."""
+        body: dict[str, Any] = {"set": set_name, "k": k}
+        if configs:
+            body["configs"] = [dict(c) for c in configs]
+        return self.db._call("POST", f"/v1/collections/{self.name}/eval/runs", body)

@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from . import observe
 from .embed import Embedder
 from .extract import Extractor
 from .names import ID_NAMESPACE, engine_name
@@ -239,6 +241,7 @@ class Documents:
                     principals: list[str] | None, role: str, graph_hops: int | None, graph_k: int = 5) -> dict:
         """The top `k` search hits, then up to `graph_k` chunks connected to them in the graph (marked via=graph).
         Every hit is checked against the catalog: only the document's live version, never one being deleted."""
+        t_start = time.perf_counter()
         coll = await self.collection(tenant, collection)
         key = engine_name(tenant, collection)
         flt = self.filter(principals, role, where)
@@ -270,7 +273,10 @@ class Documents:
         for h in hits:
             h.pop("_doc", None)
             h.pop("_version", None)
-        return {"hits": hits, "graph": graph_info}
+        took = time.perf_counter() - t_start
+        observe.QUERY_SECONDS.labels(mode, "yes" if graph_info["used"] else "no").observe(took)
+        observe.QUERY_HITS.observe(len(hits))
+        return {"hits": hits, "graph": graph_info, "took_ms": round(took * 1000, 1)}
 
     async def current(self, hits: list[dict]) -> list[dict]:
         """Keep hits from each document's live version only, and none from documents being deleted."""

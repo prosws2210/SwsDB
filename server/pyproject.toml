@@ -18,6 +18,9 @@ dependencies = [
     "fastembed>=0.7,<1",
     "pypdf>=5,<7",
     "python-multipart>=0.0.18",
+    "prometheus-client>=0.21,<1",
+    "opentelemetry-sdk>=1.29,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.29,<2",
 ]
 
 [project.scripts]

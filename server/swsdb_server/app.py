@@ -7,12 +7,14 @@ import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 
-from . import DATA_FORMAT, __version__
+from . import DATA_FORMAT, __version__, observe
 from .api_v1 import router as v1_router
 from .documents import Documents
 from .embed import Embedder
@@ -23,6 +25,8 @@ from .settings import Settings
 from .stores import Conflict, GraphStore, NotFound, SqlStore, StoreError, Unavailable, VectorStore
 
 log = logging.getLogger("swsdb")
+
+CONSOLE_DIR = Path(__file__).parent / "console"
 
 ERROR_CODES = {400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 409: "conflict",
                422: "invalid", 503: "unavailable"}
@@ -118,6 +122,8 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
             await app.state.monitor.stop()
 
     app = FastAPI(title="swsdb", version=__version__, lifespan=lifespan, docs_url="/docs", redoc_url=None)
+    app.add_middleware(observe.HttpMetrics)
+    observe.setup_tracing(__version__)
     app.state.settings = s
     app.state.monitor = monitor
     app.state.sql = app.state.vector = app.state.graph = app.state.docs = None
@@ -210,5 +216,29 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
             **({"sync": await _sync_stats(request.app)} if request.app.state.docs is not None else {}),
         }
 
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics(request: Request, _: str = Depends(require_key)) -> Response:
+        """Prometheus metrics. Needs an API key once keys are set (they reveal document counts)."""
+        await observe.refresh(request.app)
+        return Response(observe.exposition(), media_type="text/plain; version=0.0.4; charset=utf-8")
+
+    @app.get("/console", include_in_schema=False)
+    async def console_root() -> RedirectResponse:
+        return RedirectResponse("/console/")
+
     app.include_router(v1_router(require_key))
+    app.mount("/console", StaticFiles(directory=CONSOLE_DIR, html=True), name="console")
+
+    @app.middleware("http")
+    async def console_headers(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/console"):
+            # the console only talks to this server; nothing inline, nothing from elsewhere
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
     return app

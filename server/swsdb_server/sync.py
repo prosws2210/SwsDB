@@ -23,6 +23,7 @@ import psycopg
 import redis.exceptions
 from psycopg_pool import PoolTimeout
 
+from . import observe
 from .embed import EmbeddingError
 from .extract import ExtractionError
 from .names import engine_name
@@ -177,6 +178,10 @@ class Sync:
     async def _record_failure(self, row: dict, e: BaseException) -> None:
         msg = f"{type(e).__name__}: {e}".strip()[:2000]
         doc = str(row["document_id"])
+        permanent = row["op"] == "index" and not transient(e)
+        observe.SYNC_FAILURES.labels(row["op"], "permanent" if permanent else "transient").inc()
+        if permanent:
+            observe.INGEST_DOCS.labels("failed").inc()
         if transient(e) or row["op"] != "index":
             wait = backoff(row["attempts"])
             log.warning("%s %s v%d failed (attempt %d, retry in %.0fs): %s", row["op"], doc, row["version"],
@@ -212,6 +217,7 @@ class Sync:
             raise Permanent(f"collection {collection!r} was created with embeddings {coll['embedding']}, but this "
                             f"server uses {d.embedder.name}; set SWSDB_EMBEDDINGS / SWSDB_EMBEDDINGS_MODEL back")
         key = engine_name(tenant, collection)
+        t0 = time.perf_counter()
 
         chunks = await self._chunks(doc, version)
         await self._vectors(key, coll, doc, chunks)
@@ -220,6 +226,9 @@ class Sync:
         if coll["graph"] and d.graph:
             await self.write_graph(key, doc, version)
         await self._switch_on(key, doc, version, len(chunks))
+        observe.INGEST_SECONDS.observe(time.perf_counter() - t0)
+        observe.INGEST_DOCS.labels("ready").inc()
+        observe.INGEST_CHUNKS.inc(len(chunks))
 
     async def _chunks(self, doc: dict, version: int) -> list[dict]:
         """The version's chunks from the catalog; parsed from the stored file the first time."""

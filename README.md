@@ -2,12 +2,13 @@
 
 **One database for AI applications: relational, vector and graph in a single Docker container.**
 
-> **Status: early development (Phases 0–4 of [PLAN.md](PLAN.md) done).** Working today: PostgreSQL 17, Qdrant 1.19
+> **Status: early development (Phases 0–5 of [PLAN.md](PLAN.md) done).** Working today: PostgreSQL 17, Qdrant 1.19
 > and FalkorDB 4.22 in one supervised image; document ingestion (PDF, Markdown, HTML, text) with hybrid retrieval
 > (dense + BM25) and graph expansion; permissions per document; cross-store consistency (outbox, retries,
-> reconciliation) proven by chaos tests; a REST API for collections, vectors, graph (Cypher) and SQL; tenants; admin
-> and read-only API keys; a Python SDK and `swsdb` CLI. Evaluation, the console and backups are next; items marked
-> *(planned)* describe them. No image is published yet: build it from source (below).
+> reconciliation) proven by chaos tests; a web console; retrieval evaluation; Prometheus metrics and OpenTelemetry
+> traces; a REST API for collections, vectors, graph (Cypher) and SQL; tenants; admin and read-only API keys; a Python
+> SDK and `swsdb` CLI. Backups, the MCP server and hardening are next; items marked *(planned)* describe them. No
+> image is published yet: build it from source (below).
 
 ## Try it now (from source)
 
@@ -109,9 +110,9 @@ docker run -d -p 6464:6464 swsdb/swsdb                                  # all th
   entities, and a deleted document never comes back in results. See [Consistency](#consistency).
 - **Multi-tenant from day one.** *(working)* Tenants, collections and access rules are part of the data model and are enforced in
   SQL, vector and graph queries alike.
-- **Measures your retrieval.** *(planned)* Built-in evaluation (recall@k, MRR, nDCG, latency) against a golden set, so you can
+- **Measures your retrieval.** *(working)* Built-in evaluation (recall@k, MRR, nDCG, latency) against a golden set, so you can
   compare chunking, embedding models or graph settings with numbers instead of guesses.
-- **See everything.** *(planned)* A web console for collections, ingestion jobs, failures, vector and graph growth and query
+- **See everything.** *(working)* A web console for collections, ingestion jobs, failures, vector and graph growth and query
   latency; Prometheus metrics and OpenTelemetry traces for your own dashboards.
 - **No lock-in.** *(working)* The native engines stay reachable. Use `psql`, the Qdrant client or Cypher directly whenever you need
   something swsdb's API doesn't cover.
@@ -150,6 +151,46 @@ Plain database access stays available:
 db.sql("SELECT id, title FROM documents WHERE tenant = %s", ["acme"])
 db.cypher("MATCH (p:Product)-[:MENTIONED_IN]->(d:Document) RETURN p.name, count(d)")
 ```
+
+## Console
+
+Open `http://localhost:6464/console` (enter the API key once keys are set). It works offline, like the rest of swsdb.
+
+| | |
+|---|---|
+| ![Overview: engines, consistency backlog, collections](docs/img/console-overview.jpg) | ![Search playground with how each hit was found](docs/img/console-search.jpg) |
+| **Overview**: engine health, changes waiting to reach every store, collections. | **Search**: try queries as any user; every hit shows how it was found. |
+| ![Evaluation: four configurations compared on a golden set](docs/img/console-evaluation.jpg) | ![Document diagnosis: why a document is or isn't searchable](docs/img/console-diagnosis.jpg) |
+| **Evaluation**: compare configurations on your own questions. | **Diagnosis**: why a document is or isn't searchable, per store. |
+
+Also: a graph explorer (entities, what they're related to, where they're mentioned) and a Doctor page (check and
+repair consistency).
+
+## Evaluation
+
+Write down a few questions and the documents that should answer them, then compare configurations with numbers:
+
+```python
+kb.put_eval_set("support-faq", [
+    {"query": "How long do refunds take?", "relevant": ["refunds"], "answer": "five business days"},
+    {"query": "Where do orders ship from?", "relevant": ["shipping"]},
+])
+run = kb.evaluate("support-faq", k=5)   # hybrid, dense, keyword and hybrid+graph by default
+for r in run["results"]:
+    print(r["config"]["name"], r["metrics"])   # hit, recall, mrr, ndcg, answer_found, evidence, latency p50/p95
+```
+
+Runs are stored, so a change to chunking, the embedding model or graph settings can be compared with the last run.
+
+## Monitoring
+
+- `GET /metrics`: Prometheus metrics (API key required once keys are set): engine health and probe latency, query
+  and ingestion latency, documents by status, the sync backlog and its oldest change, failures by kind, requests per
+  route.
+- Traces: set `OTEL_EXPORTER_OTLP_ENDPOINT` (and optionally `OTEL_SERVICE_NAME`) to send OpenTelemetry traces over
+  OTLP/HTTP.
+- `GET /v1/collections/{name}/diagnose/{document}` (or `kb.diagnose(...)`): one document across all three stores,
+  with a plain verdict.
 
 ## Consistency
 

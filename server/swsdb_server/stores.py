@@ -106,6 +106,20 @@ MIGRATIONS: list[str] = [
     INSERT INTO swsdb.outbox (document_id, op, version)
       SELECT id, 'index', version FROM swsdb.documents WHERE status IN ('queued', 'processing');
     """,
+    # 4: retrieval evaluation: golden sets and stored runs
+    """
+    CREATE TABLE swsdb.eval_sets (
+      id bigserial PRIMARY KEY, tenant text NOT NULL, collection text NOT NULL, name text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+      FOREIGN KEY (tenant, collection) REFERENCES swsdb.collections ON DELETE CASCADE,
+      UNIQUE (tenant, collection, name));
+    CREATE TABLE swsdb.eval_cases (
+      set_id bigint NOT NULL REFERENCES swsdb.eval_sets ON DELETE CASCADE, ordinal int NOT NULL,
+      query text NOT NULL, relevant text[] NOT NULL, answer text, PRIMARY KEY (set_id, ordinal));
+    CREATE TABLE swsdb.eval_runs (
+      id bigserial PRIMARY KEY, set_id bigint NOT NULL REFERENCES swsdb.eval_sets ON DELETE CASCADE,
+      report jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+    """,
 ]
 
 

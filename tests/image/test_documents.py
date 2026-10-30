@@ -175,12 +175,21 @@ def test_delete_removes_it_everywhere(box):
     add(db, "tmp", "gone", "Zebra Crossing Protocol is retired.")
     wait_ready(db, "tmp", "gone")
     db._call("DELETE", "/v1/collections/tmp/documents/gone")
+    # hidden from queries at once (checked against the catalog) ...
     assert query(db, "tmp", "Zebra Crossing Protocol", k=5)["hits"] == []
+    # ... and removed from the stores asynchronously, through the outbox
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            db._call("GET", "/v1/collections/tmp/documents/gone")
+        except SwsDBError as e:
+            assert e.status == 404
+            break
+        time.sleep(0.25)
+    else:
+        raise AssertionError("the delete was not applied within 60s")
     graph = db.collection("tmp").cypher("MATCH (n) RETURN count(n)", read_only=True)
     assert graph["rows"] == [[0]]  # document, chunks and its now-unused entities
-    with pytest.raises(SwsDBError) as e:
-        db._call("GET", "/v1/collections/tmp/documents/gone")
-    assert e.value.status == 404
 
 
 def make_pdf(pages: list[str]) -> bytes:

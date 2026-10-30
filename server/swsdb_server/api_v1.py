@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Reque
 from pydantic import BaseModel, Field, field_validator
 
 from .documents import Documents
+from .evaluate import Evaluator
 from .names import DEFAULT_TENANT, NameError_, check, engine_name
 from .stores import GraphStore, NotFound, SqlStore, VectorSpec, VectorStore
 
@@ -74,6 +75,31 @@ class Query(BaseModel):
     principals: list[str] | None = None  # who is asking, e.g. ["user:42", "group:support"] (admin key only)
     graph_hops: int | None = Field(None, ge=0, le=2)  # default: 1 when the collection has a graph
     graph_k: int = Field(5, ge=0, le=50)  # connected chunks added after the k search hits
+
+
+class EvalCase(BaseModel):
+    query: str = Field(min_length=1, max_length=10_000)
+    relevant: list[str] = Field(min_length=1)  # ids of the documents that answer it
+    answer: str | None = None  # optional phrase the answer contains (checked in the returned text)
+
+
+class EvalSet(BaseModel):
+    cases: list[EvalCase] = Field(min_length=1, max_length=2000)
+
+
+class EvalConfig(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    mode: Literal["hybrid", "dense", "sparse"] = "hybrid"
+    graph_hops: int = Field(0, ge=0, le=2)
+    graph_k: int = Field(5, ge=0, le=50)
+    where: dict[str, Any] | None = None
+
+
+class EvalRun(BaseModel):
+    set: str
+    configs: list[EvalConfig] | None = None  # default: hybrid, dense, keyword and hybrid+graph
+    k: int = Field(5, ge=1, le=50)
+    principals: list[str] | None = None
 
 
 class Reconcile(BaseModel):
@@ -339,6 +365,40 @@ def router(require_key) -> APIRouter:
         return await e.docs.query(t, name, body.query, k=body.k, mode=body.mode, where=body.where,
                                   principals=body.principals, role=role, graph_hops=body.graph_hops,
                                   graph_k=body.graph_k)
+
+    # -------------------------------------------------------------- evaluation and diagnosis
+
+    @r.get("/collections/{name}/diagnose/{doc_id:path}", tags=["documents"])
+    async def diagnose(doc_id: str, name: str = Depends(collection_name), t: str = Depends(tenant),
+                       e: Engines = Depends(), _: str = Depends(admin)):
+        """Why a document is or isn't searchable: catalog, pending changes, vectors and graph, in plain words."""
+        return await Evaluator(e.docs).diagnose(t, name, doc_id)
+
+    @r.put("/collections/{name}/eval/sets/{set_name}", tags=["evaluation"])
+    async def put_eval_set(set_name: str, body: EvalSet, name: str = Depends(collection_name),
+                           t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(admin)):
+        """Create or replace a golden set: questions and the documents that should answer them."""
+        check("eval set", set_name)
+        return await Evaluator(e.docs).put_set(t, name, set_name, [c.model_dump() for c in body.cases])
+
+    @r.get("/collections/{name}/eval/sets", tags=["evaluation"])
+    async def eval_sets(name: str = Depends(collection_name), t: str = Depends(tenant), e: Engines = Depends(),
+                        _: str = Depends(admin)):
+        rows = await Evaluator(e.docs).sets(t, name)
+        return {"sets": [{**r, "updated_at": r["updated_at"].isoformat()} for r in rows]}
+
+    @r.post("/collections/{name}/eval/runs", tags=["evaluation"])
+    async def eval_run(body: EvalRun, name: str = Depends(collection_name), t: str = Depends(tenant),
+                       e: Engines = Depends(), role: str = Depends(admin)):
+        """Ask every question under each configuration; report hit rate, recall, MRR, nDCG and latency."""
+        e.need("vector")
+        configs = [c.model_dump() for c in body.configs] if body.configs else None
+        return await Evaluator(e.docs).run(t, name, body.set, configs, body.k, body.principals, role)
+
+    @r.get("/collections/{name}/eval/runs", tags=["evaluation"])
+    async def eval_runs(name: str = Depends(collection_name), t: str = Depends(tenant), e: Engines = Depends(),
+                        _: str = Depends(admin)):
+        return {"runs": await Evaluator(e.docs).runs(t, name)}
 
     # -------------------------------------------------------------- consistency
 
