@@ -1,0 +1,24 @@
+{
+  "name": "swsdb",
+  "version": "0.1.0",
+  "description": "TypeScript/JavaScript client for swsdb: one database for AI applications (relational, vector and graph).",
+  "license": "FSL-1.1-ALv2",
+  "author": "Shakti Swaroop Sahu",
+  "homepage": "https://github.com/prosws2210/SwsDB",
+  "repository": {"type": "git", "url": "https://github.com/prosws2210/SwsDB.git", "directory": "sdk/typescript"},
+  "keywords": ["database", "vector", "graph", "rag", "graphrag", "postgres", "qdrant", "falkordb"],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {".": {"types": "./dist/index.d.ts", "default": "./dist/index.js"}},
+  "files": ["dist", "README.md"],
+  "engines": {"node": ">=18"},
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3",
+    "@types/node": "22.9.0"
+  }
+}

@@ -51,6 +51,7 @@ nav:
       - Web console: guides/console.md
       - Evaluation: guides/evaluation.md
       - MCP server: guides/mcp.md
+      - LangChain, LlamaIndex and SDKs: guides/integrations.md
       - Webhooks: guides/webhooks.md
       - Security and tenants: guides/security.md
       - Snapshots, restore and upgrades: guides/backups.md
@@ -61,6 +62,7 @@ nav:
       - REST API: reference/api.md
       - CLI: reference/cli.md
       - Python SDK: reference/python.md
+      - TypeScript SDK: reference/typescript.md
   - Benchmarks: benchmarks.md
   - Architecture:
       - Overview: architecture.md

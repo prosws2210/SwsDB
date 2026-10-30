@@ -11,6 +11,8 @@ keywords = ["database", "vector", "graph", "rag", "graphrag", "postgres", "qdran
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.10,<2"]  # `swsdb mcp`: the MCP server for agents
+langchain = ["langchain-core>=0.3"]  # swsdb.langchain.SwsDBRetriever
+llama-index = ["llama-index-core>=0.12"]  # swsdb.llama_index.SwsDBRetriever
 
 [project.scripts]
 swsdb = "swsdb.cli:main"

@@ -50,6 +50,11 @@ class SwsDB:
 
     # -- plumbing
 
+    def async_twin(self) -> Any:
+        """An AsyncSwsDB with the same server, key and tenant."""
+        from .aio import AsyncSwsDB
+        return AsyncSwsDB(self.url, self._http.headers.get("api-key", ""), self.tenant)
+
     def _call(self, method: str, path: str, json: Any = None, **kw: Any) -> Any:
         try:
             r = self._http.request(method, path, json=json, **kw)

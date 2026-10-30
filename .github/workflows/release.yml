@@ -6,6 +6,7 @@ name: release
 # Optional, when configured in the repository settings:
 #   Docker Hub: secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (image: vars.DOCKERHUB_IMAGE, default <user>/swsdb)
 #   PyPI (the swsdb SDK): vars.PUBLISH_PYPI = "true" and a trusted publisher for this workflow on pypi.org
+#   npm (the TypeScript SDK): vars.PUBLISH_NPM = "true" and secrets.NPM_TOKEN
 
 on:
   push:
@@ -171,6 +172,26 @@ jobs:
           EOF
           gh release create "$GITHUB_REF_NAME" --title "swsdb $GITHUB_REF_NAME" --notes-file notes.md --generate-notes \
             "swsdb-${{ steps.tags.outputs.version }}.spdx.json"
+
+  npm:
+    needs: publish
+    if: vars.PUBLISH_NPM == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # npm provenance
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci && npm run build
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   pypi:
     needs: publish

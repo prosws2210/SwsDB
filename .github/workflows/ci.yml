@@ -24,6 +24,19 @@ jobs:
           helm template ci deploy/helm/swsdb --set apiKey.value=ci --set ingress.enabled=true > /dev/null
           ! helm template ci deploy/helm/swsdb 2>/dev/null   # refuses to render without an API key
 
+  typescript:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+
   image:
     runs-on: ubuntu-latest
     needs: test
@@ -41,6 +54,12 @@ jobs:
           git archive "$prev" | docker build -f docker/Dockerfile -t swsdb/swsdb:prev -
       - name: Container tests (lifecycle, API, documents, consistency, security, snapshots, upgrade, agents)
         run: uv run --project server --frozen pytest -q -m image tests/image --ignore=tests/image/test_quality.py
+      - name: TypeScript SDK against the server
+        run: |
+          docker run -d --name ts-check -p 6464:6464 -e SWSDB_API_KEY=ci swsdb/swsdb:dev
+          for i in $(seq 120); do curl -sf localhost:6464/readyz >/dev/null && break; sleep 2; done
+          cd sdk/typescript && npm ci && SWSDB_URL=http://localhost:6464 SWSDB_API_KEY=ci npm test
+          docker rm -f ts-check
       - name: Retrieval quality (fails on regressions)
         env:
           SWSDB_QUALITY_REPORT: quality.json
