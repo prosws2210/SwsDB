@@ -11,6 +11,7 @@ and runs under a strict Content-Security-Policy (no inline code, nothing loaded 
 | **Graph** | Entities by mentions, their relations and co-mentions as a radial map, and the documents that mention them. |
 | **Evaluation** | Golden sets of questions, runs comparing configurations, recall over time. |
 | **Doctor** | Compare Qdrant and the graph with the catalog, and queue repairs. |
+| **Backups** | Take a snapshot or a backup now; download, restore or delete snapshots; restore copies from S3. Needs the admin key from the environment. |
 
 ![Overview](../img/console-overview.jpg)
 

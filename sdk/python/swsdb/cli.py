@@ -97,6 +97,13 @@ def main(argv: list[str] | None = None) -> int:
     sr.add_argument("--yes", "-y", action="store_true", help="don't ask for confirmation")
     sx = sns.add_parser("delete", help="delete a snapshot on the server")
     sx.add_argument("id")
+    bk = sub.add_parser("backups", help="scheduled backups and their copies in S3-compatible storage")
+    bks = bk.add_subparsers(dest="bk_cmd", required=True)
+    bks.add_parser("status", help="schedule, last run and remote copies")
+    bks.add_parser("run", help="take a backup now")
+    bf = bks.add_parser("restore", help="fetch a remote copy and restore it (replaces all data)")
+    bf.add_argument("key", help="the object key shown by `swsdb backups status`")
+    bf.add_argument("--yes", "-y", action="store_true")
     k = sub.add_parser("keys", help="API keys bound to one tenant")
     ks = k.add_subparsers(dest="keys_cmd", required=True)
     kc = ks.add_parser("create", help="create a key for --tenant (printed once)")
@@ -152,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"created documents collection {a.collection}" + (" (with a knowledge graph)"
                                                                          if out["documents"]["graph"] else ""))
                 return 0
+        elif a.cmd == "backups":
+            return _backups(db, a)
         elif a.cmd == "webhooks":
             return _webhooks(db, a)
         elif a.cmd == "tenants":
@@ -245,6 +254,41 @@ def _print_answer(out: dict) -> None:
             page = f", page {p['page']}" if p.get("page") is not None else ""
             title = f" ({p['title']})" if p.get("title") else ""
             print(f"  [{p['n']}] {p['document']}{title}{page}")
+
+
+def _backups(db: SwsDB, a: argparse.Namespace) -> int:
+    if a.bk_cmd == "run":
+        r = db.run_backup()
+        where = f", uploaded to {r['uploaded']}" if r.get("uploaded") else ""
+        print(f"backup {r['snapshot']} ({_size(r['bytes'])}) in {r['took_s']}s{where}")
+        return 0
+    if a.bk_cmd == "restore":
+        m = db.fetch_backup(a.key)
+        print(f"fetched {a.key} as snapshot {m['id']} (taken {m.get('created_at')})")
+        if not a.yes and input(f"Replace ALL data on {db.url} with it? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("cancelled (the snapshot stays on the server)")
+            return 1
+        r = db.restore_snapshot(m["id"])
+        print(f"restored in {r['took_s']}s; the data from before is in snapshot {r['backup']}")
+        return 0
+    b = db.backups()
+    s = b["schedule"]
+    print(f"schedule: every {s['interval_h']} h, keep {s['keep']}" if s["interval_h"] else
+          "schedule: off (set SWSDB_BACKUP_INTERVAL_H)")
+    if s["s3"]:
+        print(f"storage:  {s['s3']['endpoint']} bucket {s['s3']['bucket']} prefix {s['s3']['prefix'] or '-'}")
+    else:
+        print("storage:  this server's volume only (set SWSDB_BACKUP_S3_BUCKET to copy backups off it)")
+    if s["last"]:
+        last = s["last"]
+        print(f"last:     {last['at']} {'ok' if last.get('ok') else 'FAILED: ' + last.get('error', '?')}")
+    if s["next_at"]:
+        print(f"next:     {s['next_at']}")
+    if b["remote_error"]:
+        print(f"remote:   unreachable: {b['remote_error']}")
+    for o in b["remote"]:
+        print(f"  {o['key']}  {_size(o['bytes'])}  {o['modified']}")
+    return 0
 
 
 def _webhooks(db: SwsDB, a: argparse.Namespace) -> int:

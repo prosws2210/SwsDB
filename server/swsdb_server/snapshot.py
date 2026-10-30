@@ -118,10 +118,14 @@ class Snapshots:
 
     async def _create(self, name: str | None) -> dict:
         st = self.app.state
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        sid = f"swsdb-{stamp}" + (f"-{name}" if name else "")
-        final = self.path(sid)
-        if final.exists():
+        for _ in range(3):  # ids carry the second they were taken: two in one second wait for the next one
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            sid = f"swsdb-{stamp}" + (f"-{name}" if name else "")
+            final = self.path(sid)
+            if not final.exists():
+                break
+            await asyncio.sleep(1)
+        else:
             raise StoreError(f"snapshot {sid!r} already exists")
         self.dir.mkdir(parents=True, exist_ok=True)
         work = self.dir / f".{sid}.work"

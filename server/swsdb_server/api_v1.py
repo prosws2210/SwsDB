@@ -15,7 +15,16 @@ from .auth import Caller
 from .documents import Documents
 from .evaluate import Evaluator
 from .names import DEFAULT_TENANT, NameError_, check, engine_name
-from .stores import GraphStore, NotFound, SqlStore, VectorSpec, VectorStore, check_pass_through_cypher
+from .stores import (
+    GraphStore,
+    NotFound,
+    SqlStore,
+    StoreError,
+    Unavailable,
+    VectorSpec,
+    VectorStore,
+    check_pass_through_cypher,
+)
 
 MAX_POINTS = 1000
 
@@ -140,6 +149,10 @@ class NewKey(BaseModel):
 
 class NewSnapshot(BaseModel):
     name: str | None = Field(None, pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+class Fetch(BaseModel):
+    key: str = Field(min_length=1, max_length=1024)
 
 
 class Restore(BaseModel):
@@ -583,6 +596,34 @@ def router(caller) -> APIRouter:
                                _: Caller = Depends(global_admin)):
         """Replace every engine's data with the snapshot's. By default the current data is snapshotted first."""
         return await request.app.state.snapshots.restore(sid, backup_first=body.backup_first if body else True)
+
+    # -------------------------------------------------------------- scheduled backups
+
+    @r.get("/admin/backups", tags=["snapshots"])
+    async def backups(request: Request, _: Caller = Depends(global_admin)):
+        """The schedule, the last run, and the copies in S3-compatible storage."""
+        b = request.app.state.backups
+        out = {"schedule": b.status(), "remote": [], "remote_error": None}
+        try:
+            out["remote"] = await b.remote()
+        except Exception as err:  # storage unreachable: say so, keep the rest of the page working
+            out["remote_error"] = str(err)
+        return out
+
+    @r.post("/admin/backups/run", tags=["snapshots"])
+    async def run_backup(request: Request, _: Caller = Depends(global_admin)):
+        """Take a backup now: a snapshot, uploaded when storage is configured, then old ones pruned."""
+        try:
+            return await request.app.state.backups.run()
+        except StoreError:
+            raise
+        except Exception as err:
+            raise Unavailable(f"backup failed: {err}") from err
+
+    @r.post("/admin/backups/fetch", tags=["snapshots"])
+    async def fetch_backup(body: Fetch, request: Request, _: Caller = Depends(global_admin)):
+        """Copy a backup from S3 into the server's snapshots; restore it with /admin/snapshots/{id}/restore."""
+        return await request.app.state.backups.fetch(body.key)
 
     # -------------------------------------------------------------- webhooks
 

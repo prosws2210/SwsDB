@@ -155,6 +155,18 @@ class SwsDB:
         return self._call("POST", f"/v1/admin/snapshots/{_seg(snapshot_id)}/restore",
                           {"backup_first": backup_first}, timeout=None)
 
+    def backups(self) -> dict:
+        """Scheduled backups: {"schedule": {...interval, last run, next}, "remote": [copies in S3]}."""
+        return self._call("GET", "/v1/admin/backups")
+
+    def run_backup(self) -> dict:
+        """Take a backup now (snapshot, upload, prune)."""
+        return self._call("POST", "/v1/admin/backups/run", timeout=None)
+
+    def fetch_backup(self, key: str) -> dict:
+        """Copy a remote backup into the server's snapshots. Returns its manifest; restore it by its "id"."""
+        return self._call("POST", "/v1/admin/backups/fetch", {"key": key}, timeout=None)
+
     def delete_snapshot(self, snapshot_id: str) -> dict:
         return self._call("DELETE", f"/v1/admin/snapshots/{_seg(snapshot_id)}")
 

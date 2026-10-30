@@ -34,6 +34,35 @@ Snapshots cover every tenant, so they need the admin key from the environment (`
 Snapshots live in `/swsdb/data/snapshots` on the same volume. **Copy them elsewhere** (`--output`, or
 `GET /v1/admin/snapshots/{id}/download`): a backup on the disk it protects isn't a backup.
 
+## Scheduled backups to S3
+
+Let swsdb take a snapshot on a schedule and copy it off the machine, to AWS S3 or any S3-compatible store (MinIO,
+Cloudflare R2, Backblaze B2, Wasabi, Ceph):
+
+```bash
+docker run -d --name swsdb -p 6464:6464 -v swsdb-data:/swsdb/data   -e SWSDB_API_KEY_FILE=/run/secrets/admin   -e SWSDB_BACKUP_INTERVAL_H=24 -e SWSDB_BACKUP_KEEP=7   -e SWSDB_BACKUP_S3_URL=https://s3.eu-west-1.amazonaws.com -e SWSDB_BACKUP_S3_REGION=eu-west-1   -e SWSDB_BACKUP_S3_BUCKET=acme-swsdb-backups -e SWSDB_BACKUP_S3_PREFIX=prod   -e SWSDB_BACKUP_S3_ACCESS_KEY_FILE=/run/secrets/s3-access -e SWSDB_BACKUP_S3_SECRET_KEY_FILE=/run/secrets/s3-secret   -v ./secrets:/run/secrets:ro ghcr.io/prosws2210/swsdb
+```
+
+- **Each run** takes a snapshot (named `swsdb-<time>-backup`), uploads it (in 64 MB parts when it is large), then keeps
+  the last `SWSDB_BACKUP_KEEP` backups on the volume and in the bucket.
+- **Restarts don't reset the schedule.** The last run is recorded on the volume, and a backup that came due while
+  swsdb was down runs a minute after it starts.
+- **Watching it.** `swsdb backups status`, the console's **Backups** page, or `GET /v1/admin/backups` show the
+  schedule, the last run (or its error) and the remote copies. `swsdb backups run` takes one now.
+
+Restoring from a remote copy, on this machine or a new one configured with the same bucket:
+
+```bash
+swsdb backups status                                  # lists the copies in the bucket
+swsdb backups restore prod/swsdb-20261031-020000-backup.tar
+```
+
+It downloads the copy into the server's snapshots, then restores it like any snapshot (the current data is
+snapshotted first).
+
+The bucket's credentials only need list, get, put and delete on the prefix. Use a bucket lifecycle rule or object lock
+if backups must outlive a compromised server.
+
 ## Restore
 
 ```bash

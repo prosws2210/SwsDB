@@ -73,6 +73,9 @@ const ICONS = {
   link: [["path", { d: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" }]],
   wifi: [["path", { d: "M2.5 9a14 14 0 0 1 19 0M5.5 12.5a9.5 9.5 0 0 1 13 0M8.5 16a5 5 0 0 1 7 0M12 19.5v.1" }]],
   trophy: [["path", { d: "M8 4h8v5a4 4 0 0 1-8 0zM8 6H4.5a3 3 0 0 0 3.5 4M16 6h3.5a3 3 0 0 1-3.5 4M12 13v4M8.5 20.5h7M10 17h4v3.5h-4z" }]],
+  cloud: [["path", { d: "M7 18.5h10.5a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.6 9.1 4.75 4.75 0 0 0 7 18.5z" }]],
+  archive: [["rect", { x: 3, y: 4, width: 18, height: 4.5, rx: 1.2 }], ["path", { d: "M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5M10 12.5h4" }]],
+  download: [["path", { d: "M12 4v11.5M7 11l5 4.5 5-4.5M4.5 15v3.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V15" }]],
   wand: [["path", { d: "m4 20 11-11M14 4v2M19 9h2M17.5 5.5 19 4M9 3l.5 1.5L11 5l-1.5.5L9 7l-.5-1.5L7 5l1.5-.5z" }]],
 };
 function icon(name, cls = "") {
@@ -232,6 +235,7 @@ const PAGES = {
   search: { title: "Search", icon: "search", sub: "Ask questions as any user and see how each passage was found." },
   graph: { title: "Graph explorer", icon: "graph", sub: "Entities extracted from your documents, how they relate and where they're mentioned." },
   eval: { title: "Evaluation", icon: "eval", sub: "Measure retrieval on your own questions and compare configurations with numbers." },
+  backups: { title: "Backups", icon: "archive", sub: "Snapshots of every engine at one consistent point, scheduled backups and their copies in S3." },
   doctor: { title: "Doctor", icon: "doctor", sub: "Check that Qdrant and the graph agree with Postgres, the source of truth, and repair drift." },
 };
 const view = {};
@@ -745,6 +749,113 @@ view.eval = async (root, _arg, actions) => {
   await load();
 };
 
+const bytes = (n) => {
+  if (n === null || n === undefined) return "-";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i += 1; }
+  return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+};
+
+async function downloadSnapshot(id) {
+  // a plain link can't send the API key: fetch it, then hand the browser a local copy to save
+  const headers = {};
+  const key = sessionStorage.getItem("swsdb.key");
+  if (key) headers["api-key"] = key;
+  toast(`Downloading ${id}…`, "info");
+  const r = await fetch(`/v1/admin/snapshots/${encodeURIComponent(id)}/download`, { headers });
+  if (!r.ok) { showError(`download failed (${r.status})`); return; }
+  const url = URL.createObjectURL(await r.blob());
+  const a = h("a", { href: url, download: `${id}.tar` });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+view.backups = async (root, _arg, actions) => {
+  fill(root, skeleton("block", 3));
+  let data;
+  try {
+    data = await Promise.all([api("GET", "/v1/admin/backups"), api("GET", "/v1/admin/snapshots")]);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 403) {
+      fill(root, empty("lock", "Backups need the admin key from the server's environment",
+        "Snapshots cover every tenant, so a tenant's key can't take or restore them."));
+      return;
+    }
+    throw e;
+  }
+  const [b, snaps] = data;
+  const s = b.schedule;
+  const busy = (label) => toast(label, "info");
+
+  async function restore(id, note) {
+    if (!confirm(`Replace ALL data in every tenant with ${id}?${note ? "\n\n" + note : ""}\n\nThe current data is snapshotted first.`)) return;
+    busy(`Restoring ${id}…`);
+    const r = await guard(() => api("POST", `/v1/admin/snapshots/${encodeURIComponent(id)}/restore`, { backup_first: true }));
+    if (r) { toast(`Restored ${id} in ${r.took_s}s (previous data: ${r.backup})`); route(); }
+  }
+
+  fill(actions,
+    btn("Take snapshot", async () => {
+      busy("Taking a snapshot…");
+      const r = await guard(() => api("POST", "/v1/admin/snapshots", {}));
+      if (r) { toast(`Snapshot ${r.id} (${bytes(r.bytes)}) in ${r.took_s}s`); route(); }
+    }, { ico: "archive" }),
+    btn("Back up now", async () => {
+      busy("Backing up…");
+      const r = await guard(() => api("POST", "/v1/admin/backups/run"));
+      if (r) { toast(r.uploaded ? `Backed up and uploaded to ${r.uploaded}` : `Backed up as ${r.snapshot}`); route(); }
+    }, { kind: "primary", ico: "cloud" }));
+
+  const last = s.last;
+  const schedule = card(
+    h("div", { class: "row between" },
+      h("div", { class: "row" }, h("div", { class: `icon-tile ${s.interval_h ? "green" : "amber"}` }, icon("clock")),
+        h("div", {}, h("b", {}, s.interval_h ? `Every ${s.interval_h} h, keeping the last ${s.keep}` : "No schedule"),
+          h("div", { class: "small muted" }, s.interval_h ? (s.next_at ? `next ${new Date(s.next_at).toLocaleString()}` : "")
+            : "Set SWSDB_BACKUP_INTERVAL_H to take backups automatically."))),
+      last ? (last.ok ? pill(`last ${rel(last.at)} · ${bytes(last.bytes)}`, "ok") : pill("last backup failed", "bad")) : pill("never run", "", false)),
+    last && !last.ok ? h("div", { class: "codeblock" }, last.error) : null,
+    h("dl", { class: "kv" },
+      h("dt", {}, "Storage"), h("dd", {}, s.s3 ? `${s.s3.endpoint} · bucket ${s.s3.bucket}${s.s3.prefix ? ` · ${s.s3.prefix}` : ""}`
+        : "this server's volume only: set SWSDB_BACKUP_S3_BUCKET to keep copies elsewhere"),
+      last && last.uploaded ? [h("dt", {}, "Last copy"), h("dd", { class: "mono" }, last.uploaded)] : null,
+      last ? [h("dt", {}, "Took"), h("dd", {}, `${last.took_s}s`)] : null));
+
+  const local = h("div", { class: "card flush" }, h("div", { class: "card-head" },
+    h("div", {}, h("h2", {}, "Snapshots on this server"), h("div", { class: "sub" }, `${plural(snaps.snapshots.length, "snapshot")} in /swsdb/data/snapshots`))),
+    table([
+      { label: "Snapshot", get: (x) => h("div", {}, h("div", { class: "mono" }, x.id), x.error ? h("div", { class: "tiny" }, pill("unreadable", "bad", false)) : null) },
+      { label: "Taken", get: (x) => h("span", { class: "muted" }, x.created_at ? rel(x.created_at) : "-") },
+      { label: "swsdb", get: (x) => x.swsdb_version || "-" },
+      { label: "Documents", num: true, get: (x) => x.documents ?? "-" },
+      { label: "Size", num: true, get: (x) => bytes(x.bytes) },
+      { label: "", num: true, get: (x) => h("div", { class: "row end" },
+        btn("", () => downloadSnapshot(x.id), { ico: "download", title: "Download" }),
+        btn("Restore", () => restore(x.id), { ico: "refresh" }),
+        btn("", async () => {
+          if (!confirm(`Delete snapshot ${x.id}?`)) return;
+          if (await guard(() => api("DELETE", `/v1/admin/snapshots/${encodeURIComponent(x.id)}`))) { toast(`Deleted ${x.id}`, "info"); route(); }
+        }, { kind: "danger", ico: "trash", title: "Delete" })) },
+    ], snaps.snapshots, { emptyView: h("div", { class: "card-pad" }, empty("archive", "No snapshots yet", "Take one: it copies every engine at one consistent point.")) }));
+
+  const remote = s.s3 ? h("div", { class: "card flush" }, h("div", { class: "card-head" },
+    h("div", {}, h("h2", {}, "Copies in S3"), h("div", { class: "sub" }, b.remote_error ? "storage unreachable" : `${b.remote.length} ${b.remote.length === 1 ? "copy" : "copies"}`))),
+    b.remote_error ? h("div", { class: "card-pad" }, h("div", { class: "codeblock" }, b.remote_error)) :
+    table([
+      { label: "Object", mono: true, get: (o) => o.key },
+      { label: "Size", num: true, get: (o) => bytes(o.bytes) },
+      { label: "Uploaded", num: true, get: (o) => h("span", { class: "muted" }, rel(o.modified)) },
+      { label: "", num: true, get: (o) => btn("Restore", async () => {
+        busy(`Fetching ${o.key}…`);
+        const m = await guard(() => api("POST", "/v1/admin/backups/fetch", { key: o.key }));
+        if (m) restore(m.id, `Fetched from ${o.key}.`);
+      }, { ico: "cloud" }) },
+    ], b.remote, { emptyView: h("div", { class: "card-pad" }, empty("cloud", "No copies yet", "Back up now, or wait for the schedule.")) })) : null;
+
+  fill(root, schedule, h("div", { class: "section-title" }, "Snapshots"), local, remote ? [h("div", { class: "section-title" }, "Remote copies"), remote] : null);
+};
+
 const FINDINGS = {
   missing_vectors: ["vector", "Missing or hidden vectors", "Documents whose live version isn't fully in Qdrant. Repair re-embeds them from the catalog."],
   stale_vectors: ["vector", "Old versions left behind", "Vectors of versions that are no longer live. Repair deletes them."],
@@ -898,7 +1009,8 @@ function init() {
   fill($("#brand-mark"), icon("database"));
   const link = (p) => h("a", { href: `#${p}`, "data-page": p }, icon(PAGES[p].icon), PAGES[p].title.replace(" explorer", ""));
   fill($("#nav"), h("div", { class: "nav-label" }, "Data"), ["overview", "collections", "search", "graph"].map(link),
-    h("div", { class: "nav-label" }, "Quality"), ["eval", "doctor"].map(link));
+    h("div", { class: "nav-label" }, "Quality"), ["eval", "doctor"].map(link),
+    h("div", { class: "nav-label" }, "Admin"), ["backups"].map(link));
   setTheme(localStorage.getItem("swsdb.theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
   $("#theme-btn").addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   $("#tenant").value = state.tenant;
@@ -910,6 +1022,9 @@ function init() {
   });
   drawKeyButton();
   $("#key-btn").addEventListener("click", openKeyDialog);
+  $("#key-input").addEventListener("keydown", (e) => {  // Enter saves (the form's first button would forget the key)
+    if (e.key === "Enter") { e.preventDefault(); $("#key-save").click(); $("#key-dialog").close(); }
+  });
   $("#key-save").addEventListener("click", () => {
     const v = $("#key-input").value.trim();
     if (v) sessionStorage.setItem("swsdb.key", v);

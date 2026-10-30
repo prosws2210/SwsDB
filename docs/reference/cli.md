@@ -26,6 +26,7 @@ skips TLS certificate checks (self-signed test servers only).
 | `swsdb snapshot restore ID\|FILE [--no-backup] [-y]` | replace all data with a snapshot |
 | `swsdb eval NAME SET [--questions FILE] [-k 5] [--rerank]` | compare configurations on a golden set |
 | `swsdb webhooks create URL [--events ...]` / `list` / `deliveries ID` / `ping ID` / `delete ID` | webhooks |
+| `swsdb backups status` / `run` / `restore KEY` | scheduled backups and their copies in S3 |
 | `swsdb tenants` | tenants and what they hold (environment admin key) |
 | `swsdb keys create [--role read\|admin] [--name N]` | a key for `--tenant`, printed once |
 | `swsdb keys list [--all-tenants]` / `keys revoke ID` | manage keys |

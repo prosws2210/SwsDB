@@ -21,6 +21,7 @@ from . import DATA_FORMAT, __version__, mcp_http, observe
 from .answer import Answerer
 from .api_v1 import router as v1_router
 from .auth import Caller, KeyStore
+from .backups import Backups
 from .documents import Documents
 from .embed import Embedder
 from .extract import Extractor, NameExtractor
@@ -139,11 +140,13 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
         starter = None
         if app.state.sql is not None and app.state.vector is not None and app.state.docs is None:
             starter = asyncio.create_task(_start_documents(app), name="swsdb-documents-start")
+        app.state.backups.start()
         async with AsyncExitStack() as stack:
             for m in app.state.mcp_servers:  # the MCP transports' session managers
                 await stack.enter_async_context(m.session_manager.run())
             yield
         preload.cancel()
+        await app.state.backups.stop()
         if starter:
             starter.cancel()
         if app.state.docs is not None:
@@ -169,6 +172,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     app.state.maintenance = None  # "snapshot" or "restore" while one runs
     app.state.answerer = None
     app.state.snapshots = Snapshots(app)
+    app.state.backups = Backups(app)
     for k, v in (stores or {}).items():
         setattr(app.state, k, v)
 

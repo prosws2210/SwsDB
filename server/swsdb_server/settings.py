@@ -13,7 +13,8 @@ from .engines import parse_engines
 
 # Secrets can come from files instead (Docker and Kubernetes secrets): SWSDB_API_KEY_FILE=/run/secrets/swsdb_key.
 # Environment variables show up in `docker inspect`; mounted files don't.
-SECRET_FILES = ("API_KEY", "READ_ONLY_API_KEY", "LLM_API_KEY", "EMBEDDINGS_API_KEY")
+SECRET_FILES = ("API_KEY", "READ_ONLY_API_KEY", "LLM_API_KEY", "EMBEDDINGS_API_KEY", "BACKUP_S3_ACCESS_KEY",
+                "BACKUP_S3_SECRET_KEY")
 
 
 def secrets_from_files(environ: dict | None = None) -> None:
@@ -67,6 +68,16 @@ class Settings(BaseSettings):
     ingest_workers: int = Field(2, ge=1, le=32)
     reconcile_interval_s: float = Field(600, ge=0)  # compare catalog and stores this often (0: only on request)
     max_upload_mb: int = Field(100, ge=1, le=4096)
+
+    # scheduled backups: a snapshot every N hours (0: off), copied to S3-compatible storage when a bucket is set
+    backup_interval_h: float = Field(0, ge=0)
+    backup_keep: int = Field(7, ge=1, le=1000)
+    backup_s3_url: str | None = None  # e.g. https://s3.eu-west-1.amazonaws.com or http://minio:9000
+    backup_s3_bucket: str | None = None
+    backup_s3_prefix: str = "swsdb"
+    backup_s3_region: str = "us-east-1"
+    backup_s3_access_key: SecretStr | None = None
+    backup_s3_secret_key: SecretStr | None = None
 
     @field_validator("embeddings_api_key", "llm_api_key", mode="before")
     @classmethod

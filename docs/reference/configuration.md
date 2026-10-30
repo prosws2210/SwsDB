@@ -33,6 +33,13 @@ suffix (e.g. `SWSDB_API_KEY_FILE=/run/secrets/admin`).
 | `SWSDB_ENTITIES` | `auto` | entities for the graph: `auto` (the chat model if set, else names in the text), `llm`, `names` or `off` |
 | `SWSDB_INGEST_WORKERS` | `2` | documents indexed at the same time |
 | `SWSDB_MAX_UPLOAD_MB` | `100` | largest accepted upload |
+| `SWSDB_BACKUP_INTERVAL_H` | `0` | take a backup every N hours (`0`: no schedule) |
+| `SWSDB_BACKUP_KEEP` | `7` | backups kept on the volume and in the bucket |
+| `SWSDB_BACKUP_S3_URL` | `https://s3.amazonaws.com` | S3 or S3-compatible endpoint |
+| `SWSDB_BACKUP_S3_BUCKET` | unset | copy backups to this bucket (unset: they stay on the volume) |
+| `SWSDB_BACKUP_S3_PREFIX` | `swsdb` | key prefix inside the bucket |
+| `SWSDB_BACKUP_S3_REGION` | `us-east-1` | signing region |
+| `SWSDB_BACKUP_S3_ACCESS_KEY` †, `SWSDB_BACKUP_S3_SECRET_KEY` † | unset | credentials |
 | `SWSDB_RECONCILE_INTERVAL_S` | `600` | how often the stores are compared with the catalog (`0`: only on request) |
 
 A collection remembers the embedding model it was created with. Changing `SWSDB_EMBEDDINGS_MODEL` later doesn't
