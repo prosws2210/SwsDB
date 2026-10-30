@@ -1,0 +1,4 @@
+#!/command/with-contenv sh
+# The swsdb server (API on 6464). Starts after the engines are launched and stops before them, so in-flight
+# requests finish while the engines are still up. It waits for engine readiness itself.
+exec s6-setuidgid swsdb /opt/swsdb/venv/bin/python -m swsdb_server 2>&1

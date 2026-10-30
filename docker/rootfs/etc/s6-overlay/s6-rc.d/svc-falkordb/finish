@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/swsdb/bin/service-finish falkordb "$1" "$2"

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Shared finish script: $1 = service name, $2 = exit code (256 when killed by a signal), $3 = signal.
+# s6 restarts the service after this returns, unless the container is stopping.
+name="$1"; code="$2"; sig="$3"
+if [ "$code" = 256 ]; then
+  [ "$sig" = 15 ] || [ "$sig" = 2 ] || echo "[swsdb] $name was killed by signal $sig; restarting"
+elif [ "$code" != 0 ]; then
+  echo "[swsdb] $name exited with code $code; restarting"
+fi
+exit 0

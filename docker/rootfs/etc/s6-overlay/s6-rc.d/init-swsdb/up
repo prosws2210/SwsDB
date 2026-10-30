@@ -1,0 +1,1 @@
+/command/with-contenv /opt/swsdb/venv/bin/python -m swsdb_server.bootstrap

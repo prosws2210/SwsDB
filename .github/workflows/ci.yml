@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Lint
+        run: uv run --project server --frozen ruff check server/swsdb_server tests
+      - name: Unit tests
+        run: uv run --project server --frozen pytest -q
+
+  image:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Build the image
+        run: docker build -f docker/Dockerfile -t swsdb/swsdb:dev .
+      - name: Container tests (start, durability, crash recovery, engine selection, auth)
+        run: uv run --project server --frozen pytest -q -m image tests/image
+      - name: Image size
+        run: docker image inspect swsdb/swsdb:dev --format 'image size {{.Size}} bytes'

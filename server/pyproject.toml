@@ -1,0 +1,34 @@
+[project]
+name = "swsdb-server"
+dynamic = ["version"]
+description = "swsdb server: one database for AI applications (relational, vector and graph in one container)."
+readme = "README.md"
+license = "FSL-1.1-ALv2"
+authors = [{ name = "Shakti Swaroop Sahu" }]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "httpx>=0.28,<1",
+    "psycopg[binary]>=3.2,<4",
+    "redis>=5.2,<7",
+]
+
+[project.scripts]
+swsdb-server = "swsdb_server.__main__:main"
+swsdb-admin = "swsdb_server.admin:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "swsdb_server/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["swsdb_server"]

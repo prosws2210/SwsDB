@@ -1,0 +1,9 @@
+line-length = 120
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF", "PLW"]
+ignore = ["S101", "S603", "S607", "S104"]
+
+[lint.isort]
+known-first-party = ["swsdb_server"]

@@ -1,0 +1,4 @@
+#!/command/with-contenv sh
+# PostgreSQL: the source of truth. Stopped with SIGINT (fast shutdown: clean checkpoint, no waiting for clients).
+if ! grep -qx sql /run/swsdb/engines; then s6-svc -O .; exit 0; fi
+exec s6-setuidgid swsdb "/usr/lib/postgresql/${SWSDB_PG_MAJOR:-17}/bin/postgres" -D /swsdb/data/postgres 2>&1

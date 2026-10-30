@@ -1,0 +1,5 @@
+#!/command/with-contenv sh
+# Qdrant: vectors. Runs from its data directory so anything it writes next to itself stays on the volume.
+if ! grep -qx vector /run/swsdb/engines; then s6-svc -O .; exit 0; fi
+cd /swsdb/data/qdrant || exit 1
+exec s6-setuidgid swsdb /opt/swsdb/engines/qdrant/qdrant --config-path /run/swsdb/qdrant.yaml 2>&1

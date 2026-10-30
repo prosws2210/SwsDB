@@ -1,0 +1,4 @@
+#!/command/with-contenv sh
+# FalkorDB: the graph engine (a module loaded into a Redis-compatible server). SIGTERM makes it save before exiting.
+if ! grep -qx graph /run/swsdb/engines; then s6-svc -O .; exit 0; fi
+exec s6-setuidgid swsdb /opt/swsdb/engines/falkordb/redis-server /run/swsdb/redis.conf 2>&1

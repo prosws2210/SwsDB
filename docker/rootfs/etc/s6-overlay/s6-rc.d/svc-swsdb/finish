@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/swsdb/bin/service-finish swsdb "$1" "$2"
