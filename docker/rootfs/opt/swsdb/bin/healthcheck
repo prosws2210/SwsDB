@@ -1,0 +1,8 @@
+#!/bin/sh
+# Docker HEALTHCHECK: ready when /readyz answers 200. With TLS on, the certificate names the public host, not
+# 127.0.0.1, so this local probe skips verification.
+port="${SWSDB_PORT:-6464}"
+if [ -n "${SWSDB_TLS_CERT_FILE:-}" ]; then
+    exec curl -fsSk -o /dev/null "https://127.0.0.1:${port}/readyz"
+fi
+exec curl -fsS -o /dev/null "http://127.0.0.1:${port}/readyz"

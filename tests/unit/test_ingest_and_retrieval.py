@@ -90,3 +90,20 @@ def test_retrieval_filters_enforce_permissions():
     for bad in ({"_x": 1}, {"x": {"$gt": 1}}):
         with pytest.raises(StoreError):
             d._filter(None, "admin", bad)
+
+
+def test_chunks_keep_paragraph_breaks_and_headings_on_their_own_line():
+    from swsdb_server.parse import chunk, parse
+    c = chunk(parse(b"# Priya Nair\n\nPriya Nair is a principal engineer.\n\nShe mentors   engineers.", "a.md"))
+    assert c[0].text == "# Priya Nair\n\nPriya Nair is a principal engineer.\n\nShe mentors engineers."
+    assert c[0].heading == "Priya Nair"
+
+
+def test_names_link_passages_without_a_model():
+    from swsdb_server.extract import heuristic_entities
+    text = ("# Project Orion\n\nProject Orion is led by Priya Nair. Before joining Kestrel Labs she worked at "
+            "Northwind Analytics. The Lisbon office opens on Monday. Every Pull Request needs review in March.")
+    names = {e["name"] for e in heuristic_entities(text).entities}
+    assert names == {"Project Orion", "Priya Nair", "Kestrel Labs", "Northwind Analytics", "Pull Request"}
+    assert heuristic_entities("The Monday Meeting").entities[0]["name"] == "Monday Meeting"
+    assert heuristic_entities("Refunds take five days. Store credit is instant.").entities == []

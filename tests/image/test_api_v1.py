@@ -86,7 +86,7 @@ def test_sql_is_sandboxed(box):
                  "ALTER ROLE swsdb_app SUPERUSER", "COPY notes TO PROGRAM 'id'"):
         assert err(lambda s=stmt: d.sql(s)).status == 400, stmt
     assert d.sql("SELECT current_user, usesuper FROM pg_user WHERE usename = current_user")["rows"] == [
-        ["swsdb_app", False]]
+        ["swsdb_t_acme", False]]  # the tenant's own sandbox role
     assert err(lambda: d.sql("SELECT pg_sleep(5)", timeout_s=0.5)).status == 400  # statement timeout
     big = d.sql("SELECT g FROM generate_series(1, 50) g", max_rows=10)
     assert big["row_count"] == 10 and big["truncated"] is True

@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Lint
-        run: uv run --project server --frozen ruff check server/swsdb_server tests
+        run: uv run --project server --frozen ruff check server/swsdb_server sdk tests benchmarks examples
       - name: Unit tests
         run: uv run --project server --frozen pytest -q
 
@@ -24,10 +24,27 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the previous release is built for the upgrade test
       - uses: astral-sh/setup-uv@v6
       - name: Build the image
         run: docker build -f docker/Dockerfile -t swsdb/swsdb:dev .
-      - name: Container tests (start, durability, crash recovery, engine selection, auth)
-        run: uv run --project server --frozen pytest -q -m image tests/image
+      - name: Build the previous release (upgrade test)
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || echo 6f119dd)
+          echo "previous release: $prev"
+          git archive "$prev" | docker build -f docker/Dockerfile -t swsdb/swsdb:prev -
+      - name: Container tests (lifecycle, API, documents, consistency, security, snapshots, upgrade, agents)
+        run: uv run --project server --frozen pytest -q -m image tests/image --ignore=tests/image/test_quality.py
+      - name: Retrieval quality (fails on regressions)
+        env:
+          SWSDB_QUALITY_REPORT: quality.json
+        run: uv run --project server --frozen pytest -q -m image tests/image/test_quality.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-report
+          path: quality.json
+          if-no-files-found: ignore
       - name: Image size
         run: docker image inspect swsdb/swsdb:dev --format 'image size {{.Size}} bytes'

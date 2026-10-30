@@ -1,0 +1,72 @@
+site_name: swsdb
+site_description: One database for AI applications. PostgreSQL, Qdrant and FalkorDB in one container, kept consistent, with permission-aware hybrid and graph retrieval.
+repo_url: https://github.com/prosws2210/SwsDB
+repo_name: prosws2210/SwsDB
+edit_uri: edit/main/docs/
+copyright: swsdb is source-available under FSL-1.1-ALv2
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.tabs.link
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: indigo
+      toggle: {icon: material/weather-sunny, name: Light mode}
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: indigo
+      toggle: {icon: material/weather-night, name: Dark mode}
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed: {alternate_style: true}
+  - pymdownx.highlight: {anchor_linenums: true}
+  - pymdownx.inlinehilite
+
+nav:
+  - Home: index.md
+  - Quickstart (10 minutes): quickstart.md
+  - Quickstarts:
+      - RAG app with citations: quickstarts/rag-app.md
+      - GraphRAG: quickstarts/graphrag.md
+      - Agent memory over MCP: quickstarts/agent-memory.md
+  - Guides:
+      - Documents and retrieval: guides/documents.md
+      - Web console: guides/console.md
+      - Evaluation: guides/evaluation.md
+      - MCP server: guides/mcp.md
+      - Security and tenants: guides/security.md
+      - Snapshots, restore and upgrades: guides/backups.md
+      - Operations: guides/operations.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - REST API: reference/api.md
+      - CLI: reference/cli.md
+      - Python SDK: reference/python.md
+  - Benchmarks: benchmarks.md
+  - Architecture:
+      - Overview: architecture.md
+      - "ADR 0001: one container with s6": adr/0001-one-container-with-s6.md
+      - "ADR 0002: FalkorDB for the graph": adr/0002-graph-engine-falkordb.md
+      - "ADR 0003: consistency model": adr/0003-consistency-model.md
+      - "ADR 0004: tenants, keys and the SQL sandbox": adr/0004-tenant-isolation.md
+      - "ADR 0005: snapshots": adr/0005-snapshots.md
+
+exclude_docs: |
+  img/README.md

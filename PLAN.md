@@ -1,6 +1,6 @@
 # swsdb: project plan
 
-Last updated: 2026-10-30 · Owner: Shakti Swaroop Sahu · Status: Phase 5 done, Phase 6 next
+Last updated: 2026-10-31 · Owner: Shakti Swaroop Sahu · Status: Phase 6 done (v0.1.0 ready to tag), Phase 7 next
 
 ## Progress
 
@@ -12,8 +12,8 @@ Last updated: 2026-10-30 · Owner: Shakti Swaroop Sahu · Status: Phase 5 done, 
 | 3 Ingestion and hybrid retrieval | **done** | Documents (PDF, Markdown, HTML, text) chunked by structure, dense (bge-small, offline) + BM25 sparse vectors fused by RRF, optional LLM entity extraction, graph expansion (adjacent passages, shared entities, related entities), permissions in every engine query. 200-page PDF ingested in 12.6 s and cited by page. Re-ranking moved to Phase 5 |
 | 4 Consistency | **done** | Transactional outbox, idempotent sync steps, transient/permanent errors with backoff and immediate retry on engine recovery, catalog-checked queries (deletes hidden at once, only live versions), reconciliation (`/v1/admin/reconcile`, `swsdb doctor`, every 10 min) that rebuilds the graph without LLM calls. Exit criterion met: 100/100 chaos rounds converged with zero orphans and zero deleted content returned (13 Postgres kills, 22 Qdrant kills, 16 FalkorDB kills, 18 server kills, 31 engines held down mid-write) ([ADR 0003](docs/adr/0003-consistency-model.md)) |
 | 5 Console, evaluation, observability | **done** | Web console (overview, collections with per-document diagnosis, search playground, graph explorer, evaluation, doctor), served offline with a strict CSP; golden sets and stored evaluation runs comparing configurations (hit, recall, MRR, nDCG, answer found, evidence size, latency); Prometheus `/metrics`; OpenTelemetry traces; diagnosis endpoint. Re-ranking moved to Phase 7 (needs another model; evaluation will show whether it pays) |
-| 6 Hardening and public v0.1 | next | |
-| 7 | planned | |
+| 6 Hardening and public v0.1 | **done** | Snapshots and restore across all engines at one consistent point, on another machine and on newer versions ([ADR 0005](docs/adr/0005-snapshots.md)); upgrade path with a pre-migration dump and refusal of newer data (tested against the previous release in CI). MCP server over HTTP (`/mcp`, `/mcp/rw`) and stdio (`swsdb mcp`) with agent memory. Cited answers (`/answer`: a model when configured, extractive otherwise). Security review: tenant-bound keys and a Postgres role per tenant ([ADR 0004](docs/adr/0004-tenant-isolation.md)), 8 findings fixed, cross-tenant probes on every read path and MCP tool. TLS, secrets from files. Benchmarks and a retrieval-quality gate in CI. Docs site with three quickstarts and `examples/`. Release workflow: multi-arch (amd64, arm64), cosign-signed, SBOM and provenance |
+| 7 After v0.1 | next | TypeScript SDK, LangChain / LlamaIndex, compose/Helm, scheduled backups to S3 |
 
 Decisions made while building (beyond the ADRs):
 - **No catalog in Phase 2.** A collection is the engine objects named `sw_<tenant>__<collection>`; a vector-only
@@ -30,10 +30,35 @@ Decisions made while building (beyond the ADRs):
   win a top-k slot.
 - **Only the admin key may pass `principals`** (the backend saying who the user is); a read-only key sees public
   documents only.
+- **Cited answers without a model.** With no chat model configured, `/answer` picks the sentences that best match the
+  question and cites them, so `docker run` to a cited answer needs no API key. A model, when configured, writes the
+  answer from the same permission-checked passages; citations of passages that don't exist are dropped.
+- **Entities by name when there is no model.** A first run has no API key, so the graph used to hold no entities and
+  multi-hop questions failed exactly when people try swsdb. Capitalised multi-word names (people, projects,
+  companies) now link passages offline; a chat model, when set, extracts typed entities and relations instead
+  (`SWSDB_ENTITIES=auto|llm|names|off`). The CI quality gate measures this default.
+- **Extractive answers follow the chain.** The first sentence covers the question best. Each further sentence must add
+  question words not yet covered, and share a name with what is already picked (or add two new words). That keeps
+  noise out and lets an offline answer span two documents.
+- **MCP tools call the REST API** with the caller's key (in-process for `/mcp`, over HTTP for `swsdb mcp`), so agents
+  can never get more than the key allows. The tools live in the SDK, shared by both transports.
+- **Chunks keep their paragraphs.** Joining words with spaces had run headings into first sentences, which hurt
+  entity linking. Graph expansion went from no measurable gain to recall 1.0 against 0.929 on multi-hop questions.
+- **Searches go first.** Query embeddings jump ahead of document embedding (done in small batches), so search
+  latency holds up during bulk ingestion.
+- **Qdrant replies uncompressed.** httpx asks for gzip by default and Qdrant's compressed replies cost about 40 ms per
+  call over loopback; asking for `identity` took hybrid search from 66 to 22 ms server-side, and ingestion from 8.8 to
+  11.1 passages a second.
+- **Benchmarks run inside Docker's network.** From the host, Docker Desktop's port forwarding adds about 40 ms per
+  request on Windows and macOS. That is not swsdb's latency.
 
 Known gaps (tracked):
 - Cypher pass-through returns lists and maps as text (FalkorDB's verbose reply format). Decode the compact format.
 - Reconciliation covers document collections; raw vector/graph collections have no catalog to compare with.
+- Postgres shows every role the names (not contents) of other tenants' tables in `pg_catalog`.
+- Ingestion on CPU is embedding-bound (about 11 passages a second with the bundled model on a laptop). Use an embeddings
+  endpoint or a GPU build for large corpora.
+- Snapshots stay on the data volume until downloaded; scheduled off-machine copies are Phase 7.
 - The console was built as plain HTML/CSS/JS served by the server (not a Next.js export as first planned): no build step, no CDN, works offline, and every API value is rendered as text.
 
 ## 1. The product in one paragraph

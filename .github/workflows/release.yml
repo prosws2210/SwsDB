@@ -1,0 +1,186 @@
+name: release
+
+# Push a tag like v0.1.0 to publish:
+#   ghcr.io/<owner>/swsdb:<version> and :latest, for linux/amd64 and linux/arm64, signed with cosign (keyless) and with
+#   SBOM and provenance attestations; a GitHub release with an SPDX SBOM.
+# Optional, when configured in the repository settings:
+#   Docker Hub: secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (image: vars.DOCKERHUB_IMAGE, default <user>/swsdb)
+#   PyPI (the swsdb SDK): vars.PUBLISH_PYPI = "true" and a trusted publisher for this workflow on pypi.org
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/swsdb
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches the code's version
+        run: |
+          code=$(python3 -c "import re;print(re.search(r'__version__ = \"(.+?)\"', open('server/swsdb_server/__init__.py').read())[1])")
+          test "v$code" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but code says $code"; exit 1; }
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        if: env.DOCKERHUB_USERNAME != ''
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build for this platform
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: swsdb/swsdb:release-test
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+      - name: Smoke test (start, ingest, cited answer)
+        run: |
+          docker run -d --name smoke -p 6464:6464 swsdb/swsdb:release-test
+          for i in $(seq 120); do curl -sf localhost:6464/readyz >/dev/null && break; sleep 2; done
+          curl -sf localhost:6464/readyz
+          pip install ./sdk/python
+          swsdb demo | tee demo.txt
+          grep -q "Sources:" demo.txt
+          docker rm -f smoke
+      - name: Push by digest
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,"name=${{ env.GHCR_IMAGE }}",push-by-digest=true,name-canonical=true,push=true
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: digests/*
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # the GitHub release
+      packages: write
+      id-token: write  # keyless signing
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        if: env.DOCKERHUB_USERNAME != ''
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Multi-arch tags on GHCR (and Docker Hub)
+        id: tags
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sources=$(cd digests && printf "${GHCR_IMAGE}@sha256:%s " *)
+          tags="-t ${GHCR_IMAGE}:${version} -t ${GHCR_IMAGE}:latest"
+          if [ -n "$DOCKERHUB_USERNAME" ]; then
+            hub="${DOCKERHUB_IMAGE:-$DOCKERHUB_USERNAME/swsdb}"
+            tags="$tags -t ${hub}:${version} -t ${hub}:latest"
+            echo "hub=$hub" >> "$GITHUB_OUTPUT"
+          fi
+          docker buildx imagetools create $tags $sources
+          digest=$(docker buildx imagetools inspect "${GHCR_IMAGE}:${version}" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          docker buildx imagetools inspect "${GHCR_IMAGE}:${version}"
+      - name: Sign (keyless, recorded in the public transparency log)
+        run: |
+          cosign sign --yes "${GHCR_IMAGE}@${{ steps.tags.outputs.digest }}"
+          if [ -n "${{ steps.tags.outputs.hub }}" ]; then cosign sign --yes "${{ steps.tags.outputs.hub }}@${{ steps.tags.outputs.digest }}"; fi
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.GHCR_IMAGE }}@${{ steps.tags.outputs.digest }}
+          format: spdx-json
+          output-file: swsdb-${{ steps.tags.outputs.version }}.spdx.json
+          upload-artifact: false
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md <<EOF
+          ## Run it
+
+              docker run -d --name swsdb -p 6464:6464 -v swsdb-data:/swsdb/data ${GHCR_IMAGE}:${{ steps.tags.outputs.version }}
+              pip install swsdb && swsdb demo
+
+          Image digest: \`${{ steps.tags.outputs.digest }}\` (linux/amd64, linux/arm64)
+
+          Verify the signature:
+
+              cosign verify ${GHCR_IMAGE}@${{ steps.tags.outputs.digest }} \\
+                --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*' \\
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          EOF
+          gh release create "$GITHUB_REF_NAME" --title "swsdb $GITHUB_REF_NAME" --notes-file notes.md --generate-notes \
+            "swsdb-${{ steps.tags.outputs.version }}.spdx.json"
+
+  pypi:
+    needs: publish
+    if: vars.PUBLISH_PYPI == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build sdk/python --out-dir dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

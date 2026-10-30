@@ -1,0 +1,167 @@
+{
+  "all": {
+    "hybrid": {
+      "hit": 1.0,
+      "recall": 0.9886,
+      "mrr": 1.0,
+      "ndcg": 0.9866,
+      "answer_found": 0.9773,
+      "evidence": 5.0,
+      "latency_p50_ms": 29.2,
+      "latency_p95_ms": 44.3
+    },
+    "dense": {
+      "hit": 1.0,
+      "recall": 0.9886,
+      "mrr": 0.9659,
+      "ndcg": 0.9614,
+      "answer_found": 0.9773,
+      "evidence": 5.0,
+      "latency_p50_ms": 28.5,
+      "latency_p95_ms": 51.2
+    },
+    "keyword": {
+      "hit": 1.0,
+      "recall": 0.9886,
+      "mrr": 0.9886,
+      "ndcg": 0.9758,
+      "answer_found": 0.9773,
+      "evidence": 4.2045,
+      "latency_p50_ms": 6.8,
+      "latency_p95_ms": 8.3
+    },
+    "hybrid+graph": {
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9897,
+      "answer_found": 1.0,
+      "evidence": 7.0682,
+      "latency_p50_ms": 40.7,
+      "latency_p95_ms": 58.7
+    },
+    "hybrid+graph2": {
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 0.9886,
+      "ndcg": 0.9832,
+      "answer_found": 1.0,
+      "evidence": 7.0909,
+      "latency_p50_ms": 33.8,
+      "latency_p95_ms": 42.0
+    },
+    "_misses": {
+      "hybrid": [],
+      "dense": [],
+      "keyword": [],
+      "hybrid+graph": [],
+      "hybrid+graph2": []
+    }
+  },
+  "multihop": {
+    "hybrid": {
+      "hit": 1.0,
+      "recall": 0.9286,
+      "mrr": 1.0,
+      "ndcg": 0.9157,
+      "answer_found": 0.8571,
+      "evidence": 5.0,
+      "latency_p50_ms": 24.2,
+      "latency_p95_ms": 26.2
+    },
+    "dense": {
+      "hit": 1.0,
+      "recall": 0.9286,
+      "mrr": 1.0,
+      "ndcg": 0.9157,
+      "answer_found": 0.8571,
+      "evidence": 5.0,
+      "latency_p50_ms": 26.8,
+      "latency_p95_ms": 31.1
+    },
+    "keyword": {
+      "hit": 1.0,
+      "recall": 0.9286,
+      "mrr": 1.0,
+      "ndcg": 0.9004,
+      "answer_found": 0.8571,
+      "evidence": 5.0,
+      "latency_p50_ms": 7.0,
+      "latency_p95_ms": 9.7
+    },
+    "hybrid+graph": {
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9469,
+      "answer_found": 1.0,
+      "evidence": 8.0,
+      "latency_p50_ms": 33.4,
+      "latency_p95_ms": 38.3
+    },
+    "hybrid+graph2": {
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9469,
+      "answer_found": 1.0,
+      "evidence": 8.0,
+      "latency_p50_ms": 33.3,
+      "latency_p95_ms": 47.6
+    },
+    "_misses": {
+      "hybrid": [],
+      "dense": [],
+      "keyword": [],
+      "hybrid+graph": [],
+      "hybrid+graph2": []
+    }
+  },
+  "multihop_equal_evidence": {
+    "hybrid@4": {
+      "hit": 1.0,
+      "recall": 0.9286,
+      "mrr": 1.0,
+      "ndcg": 0.9157,
+      "answer_found": 0.8571,
+      "evidence": 4.0,
+      "latency_p50_ms": 26.4,
+      "latency_p95_ms": 35.9
+    },
+    "hybrid@1+graph3": {
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9595,
+      "answer_found": 1.0,
+      "evidence": 3.1429,
+      "latency_p50_ms": 33.1,
+      "latency_p95_ms": 38.2
+    },
+    "hybrid@2": {
+      "hit": 1.0,
+      "recall": 0.7143,
+      "mrr": 1.0,
+      "ndcg": 0.7789,
+      "answer_found": 0.4286,
+      "evidence": 2.0,
+      "latency_p50_ms": 22.7,
+      "latency_p95_ms": 27.0
+    },
+    "hybrid@1+graph1": {
+      "hit": 1.0,
+      "recall": 0.7857,
+      "mrr": 1.0,
+      "ndcg": 0.8342,
+      "answer_found": 0.7143,
+      "evidence": 2.0,
+      "latency_p50_ms": 34.7,
+      "latency_p95_ms": 124.4
+    }
+  },
+  "dataset": {
+    "documents": 30,
+    "questions": 44,
+    "k": 5
+  }
+}

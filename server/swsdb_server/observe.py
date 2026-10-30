@@ -26,6 +26,8 @@ QUERY_HITS = Histogram("swsdb_query_hits", "Hits returned per query", buckets=(0
                        registry=REGISTRY)
 INGEST_SECONDS = Histogram("swsdb_ingest_seconds", "Time to index one document version", buckets=(*LATENCY, 60, 300),
                            registry=REGISTRY)
+INGEST_STAGE_SECONDS = Histogram("swsdb_ingest_stage_seconds", "Time per indexing stage (chunks, vectors, extract, "
+                                 "graph, switch)", ["stage"], buckets=(*LATENCY, 60, 300), registry=REGISTRY)
 INGEST_DOCS = Counter("swsdb_ingest_documents_total", "Documents indexed or failed", ["result"], registry=REGISTRY)
 INGEST_CHUNKS = Counter("swsdb_ingest_chunks_total", "Chunks indexed", registry=REGISTRY)
 SYNC_FAILURES = Counter("swsdb_sync_failures_total", "Outbox operations that failed (and will retry or failed the "

@@ -135,6 +135,7 @@ def test_console_is_served_locked_down(box):
     assert status == 200 and b"swsdb console" in body
     csp = headers["content-security-policy"]
     assert "script-src 'self'" in csp and "unsafe-inline" not in csp and "frame-ancestors 'none'" in csp
+    assert headers["cache-control"] == "no-cache"  # an upgraded server never serves a stale console
     for asset in ("app.js", "style.css"):
         assert raw(box, f"/console/{asset}")[0] == 200
     js = raw(box, "/console/app.js")[2].decode()

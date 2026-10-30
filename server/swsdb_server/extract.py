@@ -115,3 +115,47 @@ class Extractor:
 
 class ExtractionError(RuntimeError):
     pass
+
+
+# ------------------------------------------------------------------ without a model
+
+NAME = re.compile(r"\b[A-Z][A-Za-z0-9&'-]*(?: [A-Z][A-Za-z0-9&'-]*){1,4}\b")
+LEADING = {  # capitalised only because they start a sentence or heading: never the start of a name
+    "a", "an", "the", "our", "your", "my", "their", "his", "her", "its", "this", "that", "these", "those", "every",
+    "each", "any", "all", "some", "no", "new", "before", "after", "when", "while", "if", "in", "on", "at", "for",
+    "from", "with", "to", "by", "of", "and", "but", "or", "as", "it", "we", "you", "they", "he", "she", "there",
+    "here", "please", "send", "use", "book", "ask", "see", "read", "note", "since", "until", "during", "about",
+}
+CALENDAR = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "january", "february",
+            "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"}
+
+
+def heuristic_entities(text: str) -> Extraction:
+    """Names written in capitals, two to five words long ("Priya Nair", "Project Orion", "Northwind Analytics"), with
+    sentence-starting words removed. No types, no relations: enough to link passages that mention the same person,
+    project or company, with no model and no network."""
+    ents: dict[str, dict] = {}
+    for line in text.splitlines():
+        for m in NAME.finditer(line.lstrip("# ")):
+            words = m.group(0).split()
+            while words and words[0].lower() in LEADING:
+                words = words[1:]
+            if len(words) < 2 or all(w.lower() in CALENDAR for w in words):
+                continue
+            name = " ".join(words)
+            key = entity_key(name)
+            if len(key) >= 4:
+                ents.setdefault(key, {"key": key, "name": name, "type": "Other"})
+    return Extraction(list(ents.values()), [])
+
+
+class NameExtractor:
+    """Entity linking without a model (SWSDB_ENTITIES=names, the default when no chat model is configured)."""
+
+    name = "names"
+
+    async def extract(self, text: str) -> Extraction:
+        return heuristic_entities(text)
+
+    async def close(self) -> None:
+        return None

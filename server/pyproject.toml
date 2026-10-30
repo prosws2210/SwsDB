@@ -21,6 +21,7 @@ dependencies = [
     "prometheus-client>=0.21,<1",
     "opentelemetry-sdk>=1.29,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.29,<2",
+    "mcp>=1.10,<2",
 ]
 
 [project.scripts]

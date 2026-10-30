@@ -6,10 +6,16 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 DEFAULT_URL = "http://localhost:6464"
+
+
+def _seg(value: str) -> str:
+    """One URL path segment: ids may hold '/', '?', '#' or '..'."""
+    return quote(str(value), safe="")
 
 
 class SwsDBError(Exception):
@@ -23,26 +29,36 @@ class SwsDBError(Exception):
 class SwsDB:
     """A connection to one swsdb server, acting for one tenant.
 
-    url, api_key and tenant default to SWSDB_URL, SWSDB_API_KEY and SWSDB_TENANT.
+    url, api_key and tenant default to SWSDB_URL, SWSDB_API_KEY and SWSDB_TENANT. Without a tenant, a tenant's key
+    acts for its own tenant and other keys for "default".
     """
 
     def __init__(self, url: str | None = None, api_key: str | None = None, tenant: str | None = None,
-                 timeout: float = 60.0, transport: httpx.BaseTransport | None = None):
+                 timeout: float = 60.0, transport: httpx.BaseTransport | None = None, verify: bool | str = True):
         self.url = (url or os.environ.get("SWSDB_URL") or DEFAULT_URL).rstrip("/")
-        self.tenant = tenant or os.environ.get("SWSDB_TENANT") or "default"
+        # None: the key's own tenant for a tenant's key, else "default" (the server decides)
+        self.tenant = tenant or os.environ.get("SWSDB_TENANT") or None
         key = api_key if api_key is not None else os.environ.get("SWSDB_API_KEY")
-        headers = {"swsdb-tenant": self.tenant, "user-agent": "swsdb-python"}
+        headers = {"user-agent": "swsdb-python"}
+        if self.tenant:
+            headers["swsdb-tenant"] = self.tenant
         if key:
             headers["api-key"] = key
-        self._http = httpx.Client(base_url=self.url, headers=headers, timeout=timeout, transport=transport)
+        # verify: False skips TLS certificate checks (a self-signed certificate on a test server); a path is a CA file
+        self._http = httpx.Client(base_url=self.url, headers=headers, timeout=timeout, transport=transport,
+                                  verify=verify)
 
     # -- plumbing
 
-    def _call(self, method: str, path: str, json: Any = None) -> Any:
+    def _call(self, method: str, path: str, json: Any = None, **kw: Any) -> Any:
         try:
-            r = self._http.request(method, path, json=json)
+            r = self._http.request(method, path, json=json, **kw)
         except httpx.HTTPError as e:
             raise SwsDBError(0, "unreachable", f"can't reach swsdb at {self.url}: {e}") from e
+        return self._result(r)
+
+    @staticmethod
+    def _result(r: httpx.Response) -> Any:
         if r.status_code >= 400:
             try:
                 body = r.json()
@@ -87,17 +103,72 @@ class SwsDB:
         body: dict[str, Any] = {"graph": graph, "documents": documents}
         if vector_size is not None:
             body["vector"] = {"size": vector_size, "distance": distance}
-        self._call("PUT", f"/v1/collections/{name}", body)
+        self._call("PUT", f"/v1/collections/{_seg(name)}", body)
         return Collection(self, name)
 
     def delete_collection(self, name: str) -> dict:
-        return self._call("DELETE", f"/v1/collections/{name}")
+        return self._call("DELETE", f"/v1/collections/{_seg(name)}")
 
     # -- consistency
 
     def reconcile(self, repair: bool = False, all_tenants: bool = False) -> dict:
         """Compare the catalog with the vector and graph stores. With repair=True, queue the fixes."""
         return self._call("POST", "/v1/admin/reconcile", {"dry_run": not repair, "all_tenants": all_tenants})
+
+    # -- snapshots (they cover every tenant: the admin key from the server's environment)
+
+    def create_snapshot(self, name: str | None = None) -> dict:
+        """One consistent snapshot of every engine, kept on the server's volume. Returns its manifest."""
+        return self._call("POST", "/v1/admin/snapshots", {"name": name}, timeout=None)
+
+    def snapshots(self) -> list[dict]:
+        return self._call("GET", "/v1/admin/snapshots")["snapshots"]
+
+    def download_snapshot(self, snapshot_id: str, path: str | Path) -> Path:
+        path = Path(path)
+        tmp = path.with_name(path.name + ".part")
+        try:
+            with self._http.stream("GET", f"/v1/admin/snapshots/{_seg(snapshot_id)}/download", timeout=None) as r:
+                if r.status_code >= 400:
+                    r.read()
+                    self._result(r)
+                with tmp.open("wb") as f:
+                    for chunk in r.iter_bytes(1 << 20):
+                        f.write(chunk)
+            tmp.replace(path)
+        except httpx.HTTPError as e:
+            raise SwsDBError(0, "unreachable", f"can't reach swsdb at {self.url}: {e}") from e
+        finally:
+            tmp.unlink(missing_ok=True)
+        return path
+
+    def upload_snapshot(self, path: str | Path, snapshot_id: str | None = None) -> dict:
+        """Send a snapshot file to the server (e.g. to restore it on another machine). Returns its manifest."""
+        path = Path(path)
+        sid = snapshot_id or path.name.removesuffix(".tar")
+        with path.open("rb") as f:
+            return self._call("PUT", f"/v1/admin/snapshots/{_seg(sid)}", content=f, timeout=None,
+                              headers={"content-type": "application/x-tar"})
+
+    def restore_snapshot(self, snapshot_id: str, backup_first: bool = True) -> dict:
+        """Replace all data with the snapshot's. With backup_first, the current data is snapshotted before."""
+        return self._call("POST", f"/v1/admin/snapshots/{_seg(snapshot_id)}/restore",
+                          {"backup_first": backup_first}, timeout=None)
+
+    def delete_snapshot(self, snapshot_id: str) -> dict:
+        return self._call("DELETE", f"/v1/admin/snapshots/{_seg(snapshot_id)}")
+
+    # -- API keys for one tenant
+
+    def create_key(self, role: str = "read", name: str | None = None, tenant: str | None = None) -> dict:
+        """A new key for `tenant` (default: this client's tenant). The result's "key" is shown only this once."""
+        return self._call("POST", "/v1/keys", {"role": role, "name": name, "tenant": tenant})
+
+    def keys(self, all_tenants: bool = False) -> list[dict]:
+        return self._call("GET", f"/v1/keys?all_tenants={'true' if all_tenants else 'false'}")["keys"]
+
+    def revoke_key(self, key_id: str) -> dict:
+        return self._call("DELETE", f"/v1/keys/{key_id}")
 
     # -- SQL
 
@@ -185,14 +256,14 @@ class Collection:
         return r.json()
 
     def document(self, id: str) -> dict:
-        return self.db._call("GET", f"/v1/collections/{self.name}/documents/{id}")
+        return self.db._call("GET", f"/v1/collections/{self.name}/documents/{_seg(id)}")
 
     def documents(self, limit: int = 100, offset: int = 0, status: str | None = None) -> dict:
         q = f"?limit={limit}&offset={offset}" + (f"&status={status}" if status else "")
         return self.db._call("GET", f"/v1/collections/{self.name}/documents{q}")
 
     def delete_document(self, id: str) -> dict:
-        return self.db._call("DELETE", f"/v1/collections/{self.name}/documents/{id}")
+        return self.db._call("DELETE", f"/v1/collections/{self.name}/documents/{_seg(id)}")
 
     def wait_ready(self, id: str, timeout: float = 600, poll: float = 0.5) -> dict:
         """Block until a document is searchable. Raises SwsDBError if its processing failed."""
@@ -216,18 +287,37 @@ class Collection:
                 "graph_k": graph_k}
         return self.db._call("POST", f"/v1/collections/{self.name}/query", body)["hits"]
 
+    def answer(self, question: str, k: int = 5, *, mode: str = "hybrid", where: Mapping[str, Any] | None = None,
+               principals: Sequence[str] | None = None, graph_hops: int | None = None,
+               generate: bool = True) -> dict:
+        """A short answer citing the passages it uses as [n]: {"answer", "cited", "passages", "mode", ...}. With a
+        chat model configured on the server it is generated; otherwise it is the best matching sentences."""
+        body = {"question": question, "k": k, "mode": mode, "where": dict(where) if where else None,
+                "principals": list(principals) if principals is not None else None, "graph_hops": graph_hops,
+                "generate": generate}
+        return self.db._call("POST", f"/v1/collections/{self.name}/answer", body, timeout=180)
+
+    def text(self, id: str, principals: Sequence[str] | None = None) -> dict:
+        """A document's searchable text (its live version), if the caller may read it."""
+        q = f"?principals={quote(','.join(principals))}" if principals else ""
+        return self.db._call("GET", f"/v1/collections/{self.name}/text/{_seg(id)}{q}")
+
     def diagnose(self, id: str) -> dict:
         """Why a document is or isn't searchable: catalog, pending changes, vectors and graph, with a verdict."""
-        return self.db._call("GET", f"/v1/collections/{self.name}/diagnose/{id}")
+        return self.db._call("GET", f"/v1/collections/{self.name}/diagnose/{_seg(id)}")
 
     def put_eval_set(self, name: str, cases: Sequence[Mapping[str, Any]]) -> dict:
         """A golden set: [{"query": ..., "relevant": [document ids], "answer": optional phrase}]."""
         body = {"cases": [dict(c) for c in cases]}
-        return self.db._call("PUT", f"/v1/collections/{self.name}/eval/sets/{name}", body)
+        return self.db._call("PUT", f"/v1/collections/{self.name}/eval/sets/{_seg(name)}", body)
 
-    def evaluate(self, set_name: str, k: int = 5, configs: Sequence[Mapping[str, Any]] | None = None) -> dict:
-        """Ask every question under each configuration (default: hybrid, dense, keyword, hybrid+graph)."""
+    def evaluate(self, set_name: str, k: int = 5, configs: Sequence[Mapping[str, Any]] | None = None,
+                 principals: Sequence[str] | None = None) -> dict:
+        """Ask every question under each configuration (default: hybrid, dense, keyword, hybrid+graph).
+        `principals` evaluates as that user would search (admin key)."""
         body: dict[str, Any] = {"set": set_name, "k": k}
         if configs:
             body["configs"] = [dict(c) for c in configs]
-        return self.db._call("POST", f"/v1/collections/{self.name}/eval/runs", body)
+        if principals is not None:
+            body["principals"] = list(principals)
+        return self.db._call("POST", f"/v1/collections/{self.name}/eval/runs", body, timeout=600)

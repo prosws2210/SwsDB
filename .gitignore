@@ -8,3 +8,4 @@ build/
 .env
 benchmarks/*.out
 .models/
+site/

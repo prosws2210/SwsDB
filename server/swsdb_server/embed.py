@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -45,6 +46,8 @@ class Embedder:
         self._sparse = None
         self._dim: int | None = LOCAL_DENSE_DIM if provider == "local" and self.model == LOCAL_DENSE else None
         self._lock = threading.Lock()  # one inference at a time: onnxruntime already uses every core
+        self._queries_waiting = 0  # documents give way to queries between their small batches
+        self._count = threading.Lock()
         self._http = httpx.AsyncClient(timeout=120) if provider != "local" else None
 
     @property
@@ -66,17 +69,43 @@ class Embedder:
             self._sparse = SparseTextEmbedding(LOCAL_SPARSE, cache_dir=self.cache_dir)
         return self._sparse
 
+    DOC_BATCH = 8  # documents are embedded a few passages at a time, so a search never waits long behind them
+
+    def _run(self, fn, texts: list[str], query: bool) -> list:
+        """One inference at a time. A search goes first: documents wait between their small batches while one is
+        queued, so search latency stays low during bulk ingestion."""
+        if query:
+            with self._count:
+                self._queries_waiting += 1
+            try:
+                with self._lock:
+                    return fn(texts, True)
+            finally:
+                with self._count:
+                    self._queries_waiting -= 1
+        out: list = []
+        for i in range(0, len(texts), self.DOC_BATCH):
+            while self._queries_waiting:
+                time.sleep(0.002)
+            with self._lock:
+                out += fn(texts[i:i + self.DOC_BATCH], False)
+        return out
+
+    def _dense_batch(self, texts: list[str], query: bool) -> list[list[float]]:
+        m = self._load_dense()
+        it = m.query_embed(texts) if query else m.embed(texts, batch_size=self.batch)
+        return [v.tolist() for v in it]
+
+    def _sparse_batch(self, texts: list[str], query: bool) -> list[Sparse]:
+        m = self._load_sparse()
+        it = m.query_embed(texts) if query else m.embed(texts, batch_size=self.batch)
+        return [Sparse(e.indices.tolist(), e.values.tolist()) for e in it]
+
     def _local_dense(self, texts: list[str], query: bool) -> list[list[float]]:
-        with self._lock:
-            m = self._load_dense()
-            it = m.query_embed(texts) if query else m.embed(texts, batch_size=self.batch)
-            return [v.tolist() for v in it]
+        return self._run(self._dense_batch, texts, query)
 
     def _local_sparse(self, texts: list[str], query: bool) -> list[Sparse]:
-        with self._lock:
-            m = self._load_sparse()
-            it = m.query_embed(texts) if query else m.embed(texts, batch_size=self.batch)
-            return [Sparse(e.indices.tolist(), e.values.tolist()) for e in it]
+        return self._run(self._sparse_batch, texts, query)
 
     async def dense(self, texts: list[str], query: bool = False) -> list[list[float]]:
         if not texts:

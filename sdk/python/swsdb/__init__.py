@@ -12,4 +12,4 @@ from __future__ import annotations
 from .client import Collection, SwsDB, SwsDBError
 
 __all__ = ["Collection", "SwsDB", "SwsDBError"]
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"

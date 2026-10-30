@@ -66,8 +66,10 @@ def render_pg_hba(s: Settings) -> str:
 
 
 def render_pg_ident() -> str:
-    # OS user swsdb may connect as the swsdb superuser (the server's own work) or swsdb_app (pass-through SQL)
-    return "# Written by swsdb on every start.\nswsdb   swsdb   swsdb\nswsdb   swsdb   swsdb_app\n"
+    # OS user swsdb may connect as the swsdb superuser (the server's own work), swsdb_app (the default tenant's
+    # pass-through SQL) or a tenant's sandbox role swsdb_t_<tenant> (other tenants' pass-through SQL)
+    return ("# Written by swsdb on every start.\nswsdb   swsdb   swsdb\nswsdb   swsdb   swsdb_app\n"
+            "swsdb   swsdb   /^swsdb_t_[a-z0-9_-]+$\n")
 
 
 def render_qdrant_config(s: Settings, secret: dict[str, str]) -> str:
@@ -279,6 +281,10 @@ def run(s: Settings) -> None:
         "engines": sorted(set((meta or {}).get("engines", [])) | set(engines)),
     }, indent=2) + "\n", uid, gid)
 
+    if s.tls:
+        for f in (s.tls_cert_file, s.tls_key_file):
+            if not f.is_file() or not os.access(f, os.R_OK):
+                raise BootstrapError(f"TLS file {f} is missing or unreadable (mount it read-only into the container)")
     exposed = " (native ports exposed)" if s.expose_native else ""
     print(f"[swsdb] {__version__} starting with engines: {', '.join(engines)}{exposed}", flush=True)
     if not s.api_key:

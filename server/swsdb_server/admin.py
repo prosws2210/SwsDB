@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import ssl
 import sys
 import urllib.request
 
@@ -29,7 +30,9 @@ def credentials(s: Settings) -> int:
 
 def status(s: Settings) -> int:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{s.port}/readyz", timeout=5) as r:
+        # the certificate names the public host, not 127.0.0.1: skip verification for this local call only
+        ctx = ssl._create_unverified_context() if s.tls else None  # noqa: S323
+        with urllib.request.urlopen(f"{s.local_url}/readyz", timeout=5, context=ctx) as r:  # noqa: S310 - http(s) only
             body, code = json.loads(r.read()), r.status
     except urllib.error.HTTPError as e:
         body, code = json.loads(e.read()), e.code
@@ -42,11 +45,28 @@ def status(s: Settings) -> int:
     return 0 if code == 200 else 1
 
 
+def snapshot(s: Settings, args: list[str]) -> int:
+    """`swsdb-admin snapshot create|list|restore ...`: the `swsdb snapshot` CLI against this container's API, with
+    the admin key from its environment (handy for cron: docker exec swsdb swsdb-admin snapshot create)."""
+    import os
+
+    from swsdb.cli import main as cli
+
+    os.environ.setdefault("SWSDB_URL", s.local_url)
+    if s.api_key:
+        os.environ.setdefault("SWSDB_API_KEY", s.api_key.get_secret_value())
+    # with TLS on, the certificate names the public host, not 127.0.0.1: this local call skips the check
+    return cli([*(["--insecure"] if s.tls else []), "snapshot", *args])
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="swsdb-admin")
-    p.add_argument("command", choices=["status", "credentials"])
+    p.add_argument("command", choices=["status", "credentials", "snapshot"])
+    p.add_argument("args", nargs=argparse.REMAINDER, help="for snapshot: create | list | restore <id> ...")
     args = p.parse_args()
     s = Settings()
+    if args.command == "snapshot":
+        sys.exit(snapshot(s, args.args))
     sys.exit({"status": status, "credentials": credentials}[args.command](s))
 
 

@@ -167,17 +167,23 @@ def chunk(sections: list[Section], max_words: int = 220, overlap_words: int = 40
     (bge-small reads 512 tokens, roughly 380 words)."""
     chunks: list[Chunk] = []
 
-    def emit(words: list[str], s: Section) -> None:
-        text = " ".join(words).strip()
+    def emit(words: list[tuple[int, str]], s: Section) -> None:
+        """Words are (paragraph number, word): paragraphs stay separated by a blank line in the chunk's text."""
+        parts: list[str] = []
+        for i, (para, word) in enumerate(words):
+            if i:
+                parts.append("\n\n" if para != words[i - 1][0] else " ")
+            parts.append(word)
+        text = "".join(parts).strip()
         if text:
             h = hashlib.sha256(text.encode()).hexdigest()[:32]
             chunks.append(Chunk(len(chunks), text, s.page, s.heading, h))
 
     for s in sections:
-        cur: list[str] = []
+        cur: list[tuple[int, str]] = []
         fresh = 0  # words added since the last chunk (the overlap tail doesn't count)
-        for unit in _units(s.text):
-            words = unit.split()
+        for n, unit in enumerate(_units(s.text)):
+            words = [(n, w) for w in unit.split()]
             while words:
                 room = max_words - len(cur)
                 if len(words) <= room:

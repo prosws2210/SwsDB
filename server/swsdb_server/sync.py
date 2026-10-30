@@ -62,6 +62,9 @@ class Sync:
         self._wake = asyncio.Event()
         self.reconciler: asyncio.Task | None = None
         self.last_reconcile: dict | None = None
+        self._open = asyncio.Event()  # cleared while paused: workers finish what they hold and claim nothing new
+        self._open.set()
+        self._busy = 0
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -79,6 +82,20 @@ class Sync:
                         for i in range(self.d.s.ingest_workers)]
         if self.d.s.reconcile_interval_s > 0:
             self.reconciler = asyncio.create_task(self._reconcile_loop(), name="swsdb-reconcile")
+
+    async def pause(self, timeout_s: float = 120) -> None:
+        """Hold the workers: the stores stop changing once the changes in progress are finished (snapshots)."""
+        self._open.clear()
+        deadline = time.monotonic() + timeout_s
+        while self._busy:
+            if time.monotonic() > deadline:
+                self.resume()
+                raise TimeoutError(f"{self._busy} changes still running after {timeout_s:g}s")
+            await asyncio.sleep(0.05)
+
+    def resume(self) -> None:
+        self._open.set()
+        self.wake()
 
     async def stop(self) -> None:
         tasks = [*self.workers, *([self.reconciler] if self.reconciler else [])]
@@ -117,19 +134,24 @@ class Sync:
 
     async def _work(self, n: int) -> None:
         while True:
+            await self._open.wait()
+            self._busy += 1
             try:
-                row = await self._claim()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # Postgres itself unavailable: wait and try again
-                log.debug("worker %d can't claim: %s", n, e)
-                row = None
-            if row is None:
-                self._wake.clear()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self._wake.wait(), timeout=1.0)
-                continue
-            await self._run(row)
+                try:
+                    row = await self._claim()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # Postgres itself unavailable: wait and try again
+                    log.debug("worker %d can't claim: %s", n, e)
+                    row = None
+                if row is not None:
+                    await self._run(row)
+                    continue
+            finally:
+                self._busy -= 1
+            self._wake.clear()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), timeout=1.0)
 
     async def _run(self, row: dict) -> None:
         beat = asyncio.create_task(self._heartbeat(row["id"]))
@@ -219,13 +241,29 @@ class Sync:
         key = engine_name(tenant, collection)
         t0 = time.perf_counter()
 
+        stages: dict[str, float] = {}
+
+        def mark(stage: str, since: float) -> float:
+            now = time.perf_counter()
+            stages[stage] = now - since
+            return now
+
         chunks = await self._chunks(doc, version)
+        t = mark("chunks", t0)
         await self._vectors(key, coll, doc, chunks)
+        t = mark("vectors", t)
         if d.extractor and coll["graph"]:
             await self._extract(chunks)
+            t = mark("extract", t)
         if coll["graph"] and d.graph:
             await self.write_graph(key, doc, version)
+            t = mark("graph", t)
         await self._switch_on(key, doc, version, len(chunks))
+        mark("switch", t)
+        for stage, s in stages.items():
+            observe.INGEST_STAGE_SECONDS.labels(stage).observe(s)
+        log.debug("indexed %s v%d: %d chunks in %.3fs (%s)", doc["external_id"], version, len(chunks),
+                  time.perf_counter() - t0, ", ".join(f"{k} {v * 1000:.0f}ms" for k, v in stages.items()))
         observe.INGEST_SECONDS.observe(time.perf_counter() - t0)
         observe.INGEST_DOCS.labels("ready").inc()
         observe.INGEST_CHUNKS.inc(len(chunks))

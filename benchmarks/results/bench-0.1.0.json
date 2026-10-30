@@ -1,0 +1,235 @@
+{
+  "swsdb": "0.1.0",
+  "engines": {
+    "sql": "17.11",
+    "vector": "1.19.0",
+    "graph": "4.22.3"
+  },
+  "machine": {
+    "measured_from": "a container on the server's network",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+    "cpu": "AMD Ryzen 7 7445HS w/ Radeon 740M Graphics",
+    "cpus": 12,
+    "memory_gib": 7.4
+  },
+  "corpus": {
+    "documents": 1000,
+    "chunks": 2981,
+    "paragraphs_per_doc": 6
+  },
+  "ingest": {
+    "seconds": 269.0,
+    "queue_seconds": 17.9,
+    "documents_per_s": 3.7,
+    "chunks_per_s": 11.1
+  },
+  "latency": {
+    "hybrid": {
+      "sequential": {
+        "p50_ms": 30.3,
+        "p95_ms": 41.0,
+        "p99_ms": 52.0,
+        "mean_ms": 31.9,
+        "server_p50_ms": 22.2,
+        "server_p95_ms": 32.7,
+        "qps": 31.3,
+        "concurrency": 1,
+        "queries": 100
+      },
+      "concurrent": {
+        "p50_ms": 200.2,
+        "p95_ms": 308.8,
+        "p99_ms": 434.5,
+        "mean_ms": 206.3,
+        "server_p50_ms": 142.4,
+        "server_p95_ms": 203.5,
+        "qps": 38.4,
+        "concurrency": 8,
+        "queries": 300
+      }
+    },
+    "dense": {
+      "sequential": {
+        "p50_ms": 28.8,
+        "p95_ms": 40.2,
+        "p99_ms": 48.8,
+        "mean_ms": 30.6,
+        "server_p50_ms": 20.6,
+        "server_p95_ms": 31.1,
+        "qps": 32.6,
+        "concurrency": 1,
+        "queries": 100
+      },
+      "concurrent": {
+        "p50_ms": 187.1,
+        "p95_ms": 276.8,
+        "p99_ms": 321.3,
+        "mean_ms": 193.9,
+        "server_p50_ms": 102.8,
+        "server_p95_ms": 200.5,
+        "qps": 41.0,
+        "concurrency": 8,
+        "queries": 300
+      }
+    },
+    "keyword": {
+      "sequential": {
+        "p50_ms": 12.8,
+        "p95_ms": 17.2,
+        "p99_ms": 22.7,
+        "mean_ms": 14.1,
+        "server_p50_ms": 6.9,
+        "server_p95_ms": 9.4,
+        "qps": 70.7,
+        "concurrency": 1,
+        "queries": 100
+      },
+      "concurrent": {
+        "p50_ms": 76.5,
+        "p95_ms": 95.2,
+        "p99_ms": 105.2,
+        "mean_ms": 76.0,
+        "server_p50_ms": 32.8,
+        "server_p95_ms": 51.0,
+        "qps": 104.3,
+        "concurrency": 8,
+        "queries": 300
+      }
+    },
+    "hybrid+graph": {
+      "sequential": {
+        "p50_ms": 43.1,
+        "p95_ms": 72.9,
+        "p99_ms": 111.1,
+        "mean_ms": 46.5,
+        "server_p50_ms": 34.1,
+        "server_p95_ms": 57.0,
+        "qps": 21.5,
+        "concurrency": 1,
+        "queries": 100
+      },
+      "concurrent": {
+        "p50_ms": 243.9,
+        "p95_ms": 331.5,
+        "p99_ms": 355.6,
+        "mean_ms": 250.4,
+        "server_p50_ms": 190.9,
+        "server_p95_ms": 267.9,
+        "qps": 31.9,
+        "concurrency": 8,
+        "queries": 300
+      }
+    },
+    "hybrid during ingest": {
+      "sequential": {
+        "p50_ms": 205.8,
+        "p95_ms": 575.8,
+        "p99_ms": 1096.6,
+        "mean_ms": 253.2,
+        "server_p50_ms": 185.7,
+        "server_p95_ms": 547.2,
+        "qps": 3.9,
+        "concurrency": 1,
+        "queries": 100
+      }
+    }
+  },
+  "memory_mib": {
+    "idle": {
+      "postgres": 110.9,
+      "qdrant": 92.4,
+      "falkordb": 30.9,
+      "swsdb-server": 371.3,
+      "other": 0.0,
+      "total": 605.5
+    },
+    "loaded": {
+      "postgres": 191.8,
+      "qdrant": 131.0,
+      "falkordb": 40.4,
+      "swsdb-server": 409.5,
+      "other": 0.0,
+      "total": 772.8
+    },
+    "growth": {
+      "postgres": 80.9,
+      "qdrant": 38.6,
+      "falkordb": 9.5,
+      "swsdb-server": 38.2,
+      "other": 0.0,
+      "total": 167.3
+    },
+    "curve": [
+      {
+        "chunks": 0,
+        "postgres": 110.9,
+        "qdrant": 92.4,
+        "falkordb": 30.9,
+        "swsdb-server": 371.3,
+        "other": 0.0,
+        "total": 605.5
+      },
+      {
+        "chunks": 739,
+        "postgres": 172.0,
+        "qdrant": 104.6,
+        "falkordb": 38.8,
+        "swsdb-server": 404.3,
+        "other": 0.0,
+        "total": 719.7
+      },
+      {
+        "chunks": 1486,
+        "postgres": 181.1,
+        "qdrant": 114.1,
+        "falkordb": 39.0,
+        "swsdb-server": 405.4,
+        "other": 0.0,
+        "total": 739.6
+      },
+      {
+        "chunks": 2237,
+        "postgres": 185.8,
+        "qdrant": 121.0,
+        "falkordb": 40.5,
+        "swsdb-server": 409.3,
+        "other": 0.0,
+        "total": 756.6
+      },
+      {
+        "chunks": 2981,
+        "postgres": 191.8,
+        "qdrant": 130.9,
+        "falkordb": 40.4,
+        "swsdb-server": 409.5,
+        "other": 0.0,
+        "total": 772.7
+      }
+    ]
+  },
+  "ram_gib_per_million_chunks": {
+    "qdrant": 12.22,
+    "falkordb": 2.71,
+    "data_in_ram": 14.93
+  },
+  "disk_mib": {
+    "idle": {
+      "postgres": 41.2,
+      "qdrant": 1.5,
+      "graph": 0.0,
+      "files": 0.0
+    },
+    "loaded": {
+      "postgres": 62.9,
+      "qdrant": 26.6,
+      "graph": 0.7,
+      "files": 7.9
+    }
+  },
+  "disk_gib_per_million_chunks": {
+    "postgres": 7.11,
+    "qdrant": 8.22,
+    "graph": 0.23,
+    "files": 2.59
+  }
+}

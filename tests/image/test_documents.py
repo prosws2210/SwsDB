@@ -30,8 +30,18 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
     def do_POST(self):
-        CALLS[0] += 1
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        if body["messages"][0]["role"] == "system":  # a cited answer: the first passage's first line, cited
+            block = body["messages"][-1]["content"].split("[1] ", 1)[-1].split("\n\n[2] ", 1)[0]
+            lines = [x for x in block.split("\n")[1:] if x.strip() and not x.startswith("#")]
+            data = json.dumps({"choices": [{"message": {"content": lines[0].strip() + " [1] [9]"}}]}).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        CALLS[0] += 1
         text = body["messages"][-1]["content"].split("Text:\n", 1)[-1]
         names = sorted(set(re.findall(r"\b[A-Z][a-z]+(?: [A-Z][a-z]+)+\b", text)))
         out = {"entities": [{"name": n, "type": "Other"} for n in names],

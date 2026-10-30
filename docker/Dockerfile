@@ -99,6 +99,6 @@ ENV PATH="/opt/swsdb/venv/bin:${PATH}" \
 VOLUME ["/swsdb/data"]
 EXPOSE 6464 5432 6333 6334 6379
 HEALTHCHECK --interval=10s --timeout=3s --start-period=90s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:6464/readyz >/dev/null || exit 1
+    CMD ["/opt/swsdb/bin/healthcheck"]
 
 ENTRYPOINT ["/init"]

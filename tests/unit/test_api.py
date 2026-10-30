@@ -15,7 +15,7 @@ class FakeMonitor(Monitor):
 
 
 def client(states: dict[str, str], **kw) -> TestClient:
-    s = Settings(**kw)
+    s = Settings(**{"allowed_hosts": "testserver", **kw})  # TestClient's Host header
     return TestClient(create_app(s, FakeMonitor(s, states), stores={}))
 
 
@@ -49,7 +49,7 @@ def test_keys():
 
 
 def test_readyz_waits_for_the_document_service():
-    s = Settings()
+    s = Settings(allowed_hosts="testserver")
     app = create_app(s, FakeMonitor(s, {"sql": "ready", "vector": "ready", "graph": "ready"}),
                      stores={"sql": object(), "vector": object()})
     with TestClient(app) as c:

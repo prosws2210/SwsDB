@@ -1,43 +1,49 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>swsdb console</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <aside class="side">
-    <div class="brand"><span class="logo">sw</span><span>swsdb</span></div>
-    <nav id="nav">
-      <a data-page="overview" href="#overview">Overview</a>
-      <a data-page="collections" href="#collections">Collections</a>
-      <a data-page="search" href="#search">Search</a>
-      <a data-page="graph" href="#graph">Graph</a>
-      <a data-page="eval" href="#eval">Evaluation</a>
-      <a data-page="doctor" href="#doctor">Doctor</a>
-    </nav>
-    <div class="side-foot">
-      <label>Tenant <input id="tenant" value="default" spellcheck="false"></label>
-      <button id="key-btn" class="ghost">API key</button>
-      <div id="version" class="muted"></div>
-    </div>
-  </aside>
-  <main>
-    <header class="top">
-      <h1 id="title">Overview</h1>
-      <div id="health" class="health"><span class="dot"></span><span>checking</span></div>
-    </header>
-    <div id="error" class="banner hidden"></div>
-    <section id="page"></section>
-  </main>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="brand-mark" id="brand-mark"></div>
+        <div><div class="brand-name">swsdb</div><div class="brand-sub">AI data layer</div></div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="side-foot">
+        <div class="side-card">
+          <div class="field-label">Tenant</div>
+          <input id="tenant" value="default" spellcheck="false" autocomplete="off" aria-label="Tenant">
+          <div class="row between">
+            <button id="key-btn" class="btn ghost grow" type="button"></button>
+            <button id="theme-btn" class="btn ghost icon" type="button" aria-label="Toggle theme" title="Toggle theme"></button>
+          </div>
+        </div>
+        <div id="version" class="side-meta"></div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="title"><h1 id="title">Overview</h1><p id="subtitle"></p></div>
+        <div class="top-actions"><div id="actions" class="row"></div><div id="conn" class="conn"><span class="d"></span><span>connecting</span></div></div>
+      </header>
+      <div id="error" class="banner hidden"></div>
+      <section id="page" class="stack"></section>
+    </main>
+  </div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
   <dialog id="key-dialog">
     <form method="dialog">
       <h2>API key</h2>
-      <p class="muted">Needed when the server sets SWSDB_API_KEY. Kept in this browser tab only.</p>
-      <input id="key-input" type="password" autocomplete="off" placeholder="api key">
-      <div class="row end"><button value="cancel" class="ghost">Cancel</button><button id="key-save" value="ok">Save</button></div>
+      <div class="muted small">Needed when the server sets SWSDB_API_KEY. It stays in this browser tab only (session storage) and is sent as the <span class="kbd">api-key</span> header.</div>
+      <input id="key-input" type="password" autocomplete="off" placeholder="Paste the admin or read-only key">
+      <div class="row end"><button value="clear" class="btn ghost" id="key-clear">Forget key</button><button value="cancel" class="btn ghost">Cancel</button><button id="key-save" value="ok" class="btn primary">Save</button></div>
     </form>
   </dialog>
   <script src="app.js" type="module"></script>

@@ -23,7 +23,7 @@ from psycopg.types.json import Jsonb
 
 from . import observe
 from .embed import Embedder
-from .extract import Extractor
+from .extract import Extractor, NameExtractor
 from .names import ID_NAMESPACE, engine_name
 from .parse import UnsupportedDocument, kind_of
 from .settings import Settings
@@ -71,7 +71,7 @@ def doc_public(row: dict) -> dict:
 
 class Documents:
     def __init__(self, s: Settings, sql: SqlStore, vector: VectorStore, graph: GraphStore | None,
-                 embedder: Embedder, extractor: Extractor | None):
+                 embedder: Embedder, extractor: Extractor | NameExtractor | None):
         self.s, self.sql, self.vector, self.graph = s, sql, vector, graph
         self.embedder, self.extractor = embedder, extractor
         from .sync import Sync
@@ -214,6 +214,25 @@ class Documents:
         if row is None:
             raise NotFound(f"document {external_id!r} not found in {collection!r}")
         return doc_public(row)
+
+    async def text(self, tenant: str, collection: str, external_id: str, role: str,
+                   principals: list[str] | None = None) -> dict:
+        """A document's searchable text (its live version), passage by passage. Only what the caller may read: the
+        admin key sees everything (or what `principals` may), a read-only key only documents readable by everyone.
+        Anything else is reported as not found, so its existence doesn't leak."""
+        await self.collection(tenant, collection)
+        row = await self.one("SELECT * FROM swsdb.documents WHERE id = %s",
+                             [doc_uuid(tenant, collection, external_id)])
+        allowed = row is not None and row["live_version"] is not None and row["status"] != "deleting"
+        if allowed and (principals is not None or role != "admin"):
+            who = {PUBLIC, *(principals or [])}
+            allowed = bool(who & set(row["readers"]))
+        if not allowed:
+            raise NotFound(f"document {external_id!r} not found in {collection!r} (or not searchable yet)")
+        chunks = await self.rows("SELECT ordinal, page, heading, text FROM swsdb.chunks WHERE document_id = %s "
+                                 "AND version = %s ORDER BY ordinal", [row["id"], row["live_version"]])
+        return {"id": external_id, "title": row["title"], "version": row["live_version"],
+                "metadata": row["metadata"], "chunks": chunks, "text": "\n\n".join(c["text"] for c in chunks)}
 
     # ------------------------------------------------------------------ retrieval
 
