@@ -22,8 +22,10 @@ configured. From `docker run` to these answers took 19 seconds on a laptop. Open
 see how.
 
 **Docs:** [quickstart](docs/quickstart.md) · [RAG app](docs/quickstarts/rag-app.md) · [GraphRAG](docs/quickstarts/graphrag.md) ·
-[agent memory over MCP](docs/quickstarts/agent-memory.md) · [security](docs/guides/security.md) ·
-[snapshots and upgrades](docs/guides/backups.md) · [API](docs/reference/api.md) · [benchmarks](docs/benchmarks.md)
+[agent memory over MCP](docs/quickstarts/agent-memory.md) · [LangChain, LlamaIndex, TypeScript](docs/guides/integrations.md) ·
+[deployment (Compose, Helm, managed engines)](docs/guides/deployment.md) · [security](docs/guides/security.md) ·
+[backups and upgrades](docs/guides/backups.md) · [webhooks](docs/guides/webhooks.md) · [API](docs/reference/api.md) ·
+[benchmarks](docs/benchmarks.md)
 
 ## Why
 
@@ -51,7 +53,12 @@ database server.
 - **Built for agents.** An MCP server (`/mcp` read-only, `/mcp/rw` read-write, or `swsdb mcp` over stdio): search,
   answers, documents and long-term memory, with the key's permissions.
 - **One backup.** `swsdb snapshot create` copies every engine at one consistent point. A snapshot restores on another
-  machine or a newer version. Upgrades migrate automatically and keep a rollback dump.
+  machine or a newer version. Scheduled backups go to S3-compatible storage. Upgrades migrate automatically and keep
+  a rollback dump.
+- **Fits your stack.** Python (sync and async) and TypeScript SDKs, LangChain and LlamaIndex retrievers, signed webhooks
+  when documents become searchable, optional cross-encoder re-ranking, and a `swsdb.yaml` config file.
+- **Runs your way.** One container by default; or Docker Compose with each engine in its own container, a Helm chart,
+  or managed engines (RDS, Qdrant Cloud, FalkorDB Cloud) by URL.
 - **Measured.** Golden question sets with recall, MRR and nDCG per configuration; a "why isn't this searchable?"
   diagnosis; Prometheus metrics and OpenTelemetry traces; a web console; a retrieval-quality gate in CI.
 - **No lock-in.** The native engines stay reachable (`swsdb-admin credentials`). SQL and Cypher pass through, sandboxed.
@@ -92,7 +99,7 @@ On a laptop (AMD Ryzen 7 7445HS, 12 threads, Docker Desktop with 7.4 GB), all de
 
 | | |
 |---|---|
-| Image | 376 MB, models included · ready in about 10 s from an empty volume |
+| Image | 460 MB, models included (embeddings, BM25, re-ranker) · ready in about 10 s from an empty volume |
 | Memory | about 600 MB idle with all three engines and the embedding model |
 | Search latency (server side, 3,000 passages) | hybrid p50 22 ms · keyword 7 ms · hybrid + graph 34 ms |
 | Ingestion | 11 passages/s with the bundled CPU model (an embeddings endpoint is much faster) |

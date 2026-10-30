@@ -1,6 +1,6 @@
 # swsdb: project plan
 
-Last updated: 2026-10-31 · Owner: Shakti Swaroop Sahu · Status: Phase 6 done (v0.1.0 ready to tag), Phase 7 next
+Last updated: 2026-10-31 · Owner: Shakti Swaroop Sahu · Status: Phase 6 done (v0.1.0 ready to tag), Phase 7 mostly done
 
 ## Progress
 
@@ -13,7 +13,7 @@ Last updated: 2026-10-31 · Owner: Shakti Swaroop Sahu · Status: Phase 6 done (
 | 4 Consistency | **done** | Transactional outbox, idempotent sync steps, transient/permanent errors with backoff and immediate retry on engine recovery, catalog-checked queries (deletes hidden at once, only live versions), reconciliation (`/v1/admin/reconcile`, `swsdb doctor`, every 10 min) that rebuilds the graph without LLM calls. Exit criterion met: 100/100 chaos rounds converged with zero orphans and zero deleted content returned (13 Postgres kills, 22 Qdrant kills, 16 FalkorDB kills, 18 server kills, 31 engines held down mid-write) ([ADR 0003](docs/adr/0003-consistency-model.md)) |
 | 5 Console, evaluation, observability | **done** | Web console (overview, collections with per-document diagnosis, search playground, graph explorer, evaluation, doctor), served offline with a strict CSP; golden sets and stored evaluation runs comparing configurations (hit, recall, MRR, nDCG, answer found, evidence size, latency); Prometheus `/metrics`; OpenTelemetry traces; diagnosis endpoint. Re-ranking moved to Phase 7 (needs another model; evaluation will show whether it pays) |
 | 6 Hardening and public v0.1 | **done** | Snapshots and restore across all engines at one consistent point, on another machine and on newer versions ([ADR 0005](docs/adr/0005-snapshots.md)); upgrade path with a pre-migration dump and refusal of newer data (tested against the previous release in CI). MCP server over HTTP (`/mcp`, `/mcp/rw`) and stdio (`swsdb mcp`) with agent memory. Cited answers (`/answer`: a model when configured, extractive otherwise). Security review: tenant-bound keys and a Postgres role per tenant ([ADR 0004](docs/adr/0004-tenant-isolation.md)), 8 findings fixed, cross-tenant probes on every read path and MCP tool. TLS, secrets from files. Benchmarks and a retrieval-quality gate in CI. Docs site with three quickstarts and `examples/`. Release workflow: multi-arch (amd64, arm64), cosign-signed, SBOM and provenance |
-| 7 After v0.1 | next | TypeScript SDK, LangChain / LlamaIndex, compose/Helm, scheduled backups to S3 |
+| 7 After v0.1 | **mostly done** | Done: TypeScript SDK; LangChain and LlamaIndex retrievers; async Python client; Compose layout with engines in their own containers and external managed engines (`SWSDB_POSTGRES_URL`, `SWSDB_QDRANT_URL`, `SWSDB_FALKORDB_URL`), tested end to end; Helm chart; scheduled backups to S3-compatible storage; webhooks; optional cross-encoder re-ranking; `swsdb.yaml`; typed Cypher results; availability story ([ADR 0006](docs/adr/0006-availability.md)). Designed, not shipped: Neo4j (multi-database only) and the Postgres-only lite profile ([ADR 0007](docs/adr/0007-other-graph-engines.md)); active-active servers; hosted offering (depends on L1) |
 
 Decisions made while building (beyond the ADRs):
 - **No catalog in Phase 2.** A collection is the engine objects named `sw_<tenant>__<collection>`; a vector-only
