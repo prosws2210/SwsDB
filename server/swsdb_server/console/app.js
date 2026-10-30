@@ -465,6 +465,7 @@ function hitCard(x, i, query, top, { n, cited } = {}) {
         x.heading ? pill(x.heading, "", false) : null,
         x.via === "graph" ? pill(x.graph_path ? x.graph_path.join(" → ") : "graph", "violet", false)
                           : pill(x.via === "sparse" ? "keywords" : x.via === "dense" ? "meaning" : "hybrid", "info", false),
+        x.fusion_score !== undefined ? pill("re-ranked", "violet", false) : null,
         cited ? pill("cited", "ok", false) : null,
         h("span", { class: "score" }, fmt(x.score, 3), h("span", { class: "bar" }, bar))),
       h("div", { class: "text" }, highlight(passageText(x.text, x.heading), query))));
