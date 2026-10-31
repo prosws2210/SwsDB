@@ -86,4 +86,5 @@ def test_documents_sql_tenants_and_snapshots_work_the_same(stack):
 @pytest.mark.skipif(os.environ.get("CI") is None and not COMPOSE.exists(), reason="no compose file")
 def test_compose_file_is_valid():
     out = sh("docker", "compose", "-f", str(COMPOSE), "config", "--quiet", check=False)
-    assert "SWSDB_API_KEY" in out  # refuses to start without the required values
+    # refuses to start without the required values (which one Compose names first depends on its version)
+    assert "is missing a value" in out or "required variable" in out, out

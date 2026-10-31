@@ -1,7 +1,8 @@
 name: docs
 
-# Builds the docs site on every change (broken links fail the build) and publishes it to GitHub Pages from main.
-# One-time setup: repository Settings → Pages → Source: GitHub Actions.
+# Builds the docs site on every change (broken links fail the build). Publishing to GitHub Pages from main is
+# switched on in two steps: repository Settings → Pages → Source: GitHub Actions, then a repository variable
+# DOCS_PAGES=true (Settings → Secrets and variables → Actions → Variables). Until then only the build runs.
 
 on:
   push:
@@ -20,12 +21,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uvx --with mkdocs-material==9.* mkdocs build --strict --site-dir site
       - uses: actions/upload-pages-artifact@v3
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && vars.DOCS_PAGES == 'true'
         with:
           path: site
 
   deploy:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && vars.DOCS_PAGES == 'true'
     needs: build
     runs-on: ubuntu-latest
     permissions:

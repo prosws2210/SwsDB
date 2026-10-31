@@ -34,6 +34,15 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def shareable(folder) -> str:
+    """A host folder the container's swsdb user (uid 10001) can read when it's mounted: on Linux, pytest's temporary
+    folders are private to the user running the tests (0700). Returns the folder, for the -v argument."""
+    os.chmod(folder, 0o755)  # noqa: S103 - readable test fixtures, nothing secret
+    for f in os.listdir(folder):
+        os.chmod(os.path.join(folder, f), 0o644)
+    return str(folder)
+
+
 class Box:
     """One swsdb container on a named volume."""
 
@@ -256,8 +265,7 @@ def test_a_second_container_on_the_same_volume_is_refused(volume, boxes):
 def test_a_mounted_config_file_configures_the_server(volume, boxes, tmp_path):
     (tmp_path / "swsdb.yaml").write_text("engines: [sql, vector]\nrerank: true\nreconcile_interval_s: 0\n",
                                          encoding="utf-8")
-    os.chmod(tmp_path / "swsdb.yaml", 0o644)
-    b = Box(volume, extra=["-v", f"{tmp_path}:/swsdb/config:ro"]).start()
+    b = Box(volume, extra=["-v", f"{shareable(tmp_path)}:/swsdb/config:ro"]).start()
     boxes.append(b)
     b.wait_ready()
     assert set(b.get("/readyz")[1]["engines"]) == {"sql", "vector"}  # no graph engine started

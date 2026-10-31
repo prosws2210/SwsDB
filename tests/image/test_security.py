@@ -8,7 +8,6 @@ must never see the other's marker, whatever it calls.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import ssl
 import subprocess
@@ -19,7 +18,7 @@ import uuid
 
 import pytest
 from swsdb import SwsDB, SwsDBError
-from test_container import Box, sh
+from test_container import Box, sh, shareable
 from test_documents import FAKE_LLM
 
 pytestmark = pytest.mark.image
@@ -36,7 +35,7 @@ def box(request, tmp_path_factory):
     secrets = tmp_path_factory.mktemp("secrets")
     for name, value in (("admin", ADMIN), ("read", READ)):
         (secrets / name).write_text(value + "\n", encoding="utf-8")
-        os.chmod(secrets / name, 0o644)  # readable by the container's swsdb user on Linux hosts
+    shareable(secrets)  # readable by the container's swsdb user on Linux hosts
     sh("docker", "network", "create", net)
     sh("docker", "run", "-d", "--name", llm, "--network", net, "--network-alias", "llm",
        "python:3.12-slim-trixie", "python", "-c", FAKE_LLM)
@@ -337,10 +336,8 @@ def test_tls_serves_https_and_the_healthcheck_follows(volume, boxes, tmp_path):
                     "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
                     "-keyout", str(tmp_path / "key.pem"), "-out", str(tmp_path / "cert.pem")],
                    check=True, capture_output=True)
-    for f in ("key.pem", "cert.pem"):
-        os.chmod(tmp_path / f, 0o644)
     b = Box(volume, {"SWSDB_TLS_CERT_FILE": "/tls/cert.pem", "SWSDB_TLS_KEY_FILE": "/tls/key.pem",
-                     "SWSDB_API_KEY": ADMIN}, extra=["-v", f"{tmp_path}:/tls:ro"])
+                     "SWSDB_API_KEY": ADMIN}, extra=["-v", f"{shareable(tmp_path)}:/tls:ro"])
     boxes.append(b.start())
     ctx = ssl.create_default_context(cafile=str(tmp_path / "cert.pem"))
     deadline = time.time() + 120
