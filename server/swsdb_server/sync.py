@@ -212,6 +212,10 @@ class Sync:
                 await asyncio.sleep(min(2 ** attempt, 5))
         log.error("gave up recording the failure of outbox row %s; it is retried when its lease ends", row["id"])
 
+    async def _tenant_of(self, doc_id: str) -> str:
+        row = await self.d.one("SELECT tenant FROM swsdb.documents WHERE id = %s", [doc_id])
+        return row["tenant"] if row else "?"
+
     async def _record_failure(self, row: dict, e: BaseException) -> None:
         msg = f"{type(e).__name__}: {e}".strip()[:2000]
         doc = str(row["document_id"])
@@ -219,6 +223,7 @@ class Sync:
         observe.SYNC_FAILURES.labels(row["op"], "permanent" if permanent else "transient").inc()
         if permanent:
             observe.INGEST_DOCS.labels("failed").inc()
+            observe.ACTIVITY.ingest(await self._tenant_of(doc), ok=False)
         if transient(e) or row["op"] != "index":
             wait = backoff(row["attempts"])
             log.warning("%s %s v%d failed (attempt %d, retry in %.0fs): %s", row["op"], doc, row["version"],
@@ -287,6 +292,7 @@ class Sync:
                   time.perf_counter() - t0, ", ".join(f"{k} {v * 1000:.0f}ms" for k, v in stages.items()))
         observe.INGEST_SECONDS.observe(time.perf_counter() - t0)
         observe.INGEST_DOCS.labels("ready").inc()
+        observe.ACTIVITY.ingest(doc["tenant"], ok=True)
         observe.INGEST_CHUNKS.inc(len(chunks))
 
     async def _chunks(self, doc: dict, version: int) -> list[dict]:

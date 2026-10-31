@@ -227,6 +227,51 @@ function noCollections() {
     "Create one with the SDK, e.g. db.create_collection(\"handbook\", documents=True), then add documents here.");
 }
 
+// ------------------------------------------------------------------ charts (one series each: the accent hue, values in text ink)
+
+const num = (n) => (n === null || n === undefined ? "-" : Number(n).toLocaleString());
+
+// horizontal bars for "how many of each": a label, a bar scaled to the largest value, the count
+function barList(items, { onPick, active } = {}) {
+  const max = Math.max(1, ...items.map((i) => i.count));
+  return h("div", { class: "barlist" }, items.map((i) => {
+    const fillBar = h("i");
+    fillBar.style.width = `${Math.max(2, (i.count / max) * 100)}%`;
+    const isOn = active && active(i);
+    return h(onPick ? "button" : "div", { class: `bar-row${onPick ? " pick" : ""}${isOn ? " on" : ""}`, type: onPick ? "button" : null,
+      title: `${i.label}: ${num(i.count)}`, onclick: onPick ? () => onPick(i) : null },
+      h("span", { class: "bar-label ellipsis" }, i.label), h("span", { class: "bar-track" }, fillBar),
+      h("span", { class: "bar-value" }, num(i.count)));
+  }));
+}
+
+// vertical bars over time (minutes, days): hover shows the value; sparse axis labels; a baseline
+function columnChart(points, { label = (p) => p.x, height = 120, unit = "" } = {}) {
+  const W = 600, H = height, pad = { l: 34, r: 6, t: 8, b: 20 };
+  const max = Math.max(1, ...points.map((p) => p.y));
+  const pow = 10 ** Math.floor(Math.log10(max));
+  const nice = [1, 2, 2.5, 5, 10].map((m) => m * pow).find((v) => v >= max);
+  const bw = (W - pad.l - pad.r) / Math.max(points.length, 1);
+  const svg = s("svg", { class: "colchart", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img" });
+  for (const f of [0, 0.5, 1]) {
+    const y = pad.t + (H - pad.t - pad.b) * (1 - f);
+    svg.append(s("line", { x1: pad.l, x2: W - pad.r, y1: y, y2: y, class: f ? "grid" : "base" }),
+      s("text", { x: pad.l - 6, y: y + 3, "text-anchor": "end", class: "axis" }, num(Math.round(nice * f))));
+  }
+  const every = Math.ceil(points.length / 6);
+  points.forEach((p, i) => {
+    const hgt = ((H - pad.t - pad.b) * p.y) / nice;
+    const x = pad.l + i * bw;
+    const g = s("g", { class: "col" }, s("title", {}, `${label(p)}: ${num(p.y)}${unit}`),
+      s("rect", { x: x, y: pad.t, width: bw, height: H - pad.t - pad.b, class: "hit" }),
+      p.y ? s("rect", { x: x + Math.min(1, bw * 0.15), y: H - pad.b - hgt, width: Math.max(1, bw - Math.min(2, bw * 0.3)), height: hgt,
+                        rx: Math.min(2, bw / 3), class: "val" }) : null);
+    svg.append(g);
+    if (i % every === 0) svg.append(s("text", { x: x + bw / 2, y: H - 5, "text-anchor": "middle", class: "axis" }, label(p)));
+  });
+  return svg;
+}
+
 // ------------------------------------------------------------------ pages
 
 const PAGES = {
@@ -244,17 +289,18 @@ const view = {};
 view.overview = async (root, _arg, actions) => {
   fill(actions, btn("Refresh", () => route(), { ico: "refresh" }));
   fill(root, h("div", { class: "grid c4" }, skeleton("block", 4)), skeleton("block", 2));
-  const [st, cols] = await Promise.all([api("GET", "/v1/status"), documentCollections()]);
+  const [st, cols, all, act] = await Promise.all([api("GET", "/v1/status"), documentCollections(),
+    allCollections(), api("GET", "/v1/activity").catch(() => null)]);
   for (const e of Object.values(st.engines)) {
     const hist = (state.latency[e.engine] ||= []);
     if (e.latency_ms !== null && e.latency_ms !== undefined) { hist.push(e.latency_ms); if (hist.length > 40) hist.shift(); }
   }
   const totals = cols.reduce((a, c) => {
     for (const [k, v] of Object.entries(c.info.documents.by_status || {})) a[k] = (a[k] || 0) + v;
-    a.vectors += c.info.vector ? c.info.vector.points || 0 : 0;
-    a.nodes += c.info.graph ? c.info.graph.nodes || 0 : 0;
     return a;
-  }, { vectors: 0, nodes: 0 });
+  }, {});
+  const vectors = all.reduce((a, c) => a + (c.info && c.info.vector ? c.info.vector.points || 0 : 0), 0);
+  const nodes = all.reduce((a, c) => a + (c.info && c.info.graph ? c.info.graph.nodes || 0 : 0), 0);
   const docsTotal = cols.reduce((a, c) => a + c.info.documents.count, 0);
   const sync = st.sync || {};
   const stat = (ico, color, label, value, foot) => card(h("div", { class: "row between" },
@@ -285,6 +331,18 @@ view.overview = async (root, _arg, actions) => {
         h("dt", {}, "Reconciled"), h("dd", {}, sync.last_reconcile
           ? [rel(sync.last_reconcile.at), " · ", plural(sync.last_reconcile.issues, "issue")] : "not yet (every 10 min)"))));
 
+  const minuteLabel = (p) => new Date(p.x * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const activity = act ? card(cardHead("Activity", "This server, the last hour (resets when it restarts)"),
+    h("div", { class: "metric-row" },
+      h("div", { class: "metric" }, h("b", {}, num(act.searches)), h("span", {}, "searches")),
+      h("div", { class: "metric" }, h("b", {}, act.latency_ms.p50 !== null ? `${act.latency_ms.p50} ms` : "-"),
+        h("span", {}, `median · p95 ${act.latency_ms.p95 !== null ? `${act.latency_ms.p95} ms` : "-"}`)),
+      h("div", { class: "metric" }, h("b", {}, num(act.indexed)), h("span", {}, act.failed ? `indexed · ${act.failed} failed` : "documents indexed"))),
+    h("div", { class: "facet" }, h("h3", {}, "Searches per minute"),
+      columnChart(act.minutes.map((m) => ({ x: m.minute, y: m.search })), { label: minuteLabel, unit: " searches" })),
+    h("div", { class: "facet" }, h("h3", {}, "Documents indexed per minute"),
+      columnChart(act.minutes.map((m) => ({ x: m.minute, y: m.indexed })), { label: minuteLabel, unit: " documents" }))) : null;
+
   const collCard = (c) => {
     const d = c.info.documents;
     const by = d.by_status || {};
@@ -297,72 +355,142 @@ view.overview = async (root, _arg, actions) => {
     }
     return h("div", { class: "card hover coll-card", onclick: () => { location.hash = `collections/${c.name}`; } },
       h("div", { class: "row between" }, h("div", { class: "name" }, c.name),
-        d.graph ? pill("graph", "violet", false) : pill("vectors only", "", false)),
+        d.graph ? pill("documents + graph", "violet", false) : pill("documents", "", false)),
       h("div", { class: "nums" },
-        h("div", {}, h("b", {}, d.count), h("span", {}, "documents")),
-        h("div", {}, h("b", {}, c.info.vector ? c.info.vector.points : 0), h("span", {}, "vectors")),
-        h("div", {}, h("b", {}, c.info.graph ? c.info.graph.nodes : 0), h("span", {}, "graph nodes"))),
+        h("div", {}, h("b", {}, num(d.count)), h("span", {}, "documents")),
+        h("div", {}, h("b", {}, num(c.info.vector ? c.info.vector.points : 0)), h("span", {}, "vectors")),
+        h("div", {}, h("b", {}, num(c.info.graph ? c.info.graph.nodes : 0)), h("span", {}, "graph nodes"))),
       bar,
       h("div", { class: "row between" }, h("div", { class: "legend" },
-        Object.entries(by).map(([k, v]) => h("span", {}, h("i", { class: `s-${k}` }), `${v} ${k}`))),
+        Object.entries(by).map(([k, v]) => h("span", {}, h("i", { class: `s-${k}` }), `${num(v)} ${k}`))),
         h("span", { class: "tiny muted" }, String(d.embedding || "").replace("local:", ""))));
   };
+  // collections you manage yourself (raw vectors, graphs): open them in the data browser
+  const rawCard = (c) => {
+    const v = c.info && c.info.vector, g = c.info && c.info.graph;
+    return h("div", { class: "card hover coll-card", onclick: () => { location.hash = v ? "data/vectors" : "data/cypher"; } },
+      h("div", { class: "row between" }, h("div", { class: "name" }, c.name),
+        pill(v && g ? "vectors + graph" : v ? "vectors" : "graph", "", false)),
+      h("div", { class: "nums" },
+        h("div", {}, h("b", {}, num(v ? v.points : 0)), h("span", {}, "points")),
+        h("div", {}, h("b", {}, v ? v.size : "-"), h("span", {}, v ? `dimensions · ${v.distance}` : "dimensions")),
+        h("div", {}, h("b", {}, num(g ? g.nodes : 0)), h("span", {}, "graph nodes"))));
+  };
+  const raws = all.filter((c) => c.info && !c.info.documents);
 
   fill(root,
     h("div", { class: "grid c4" },
-      stat("file", "violet", "Documents", docsTotal, `${totals.ready || 0} ready · ${totals.failed || 0} failed`),
-      stat("vector", "blue", "Vectors", totals.vectors.toLocaleString(), plural(cols.length, "collection")),
-      stat("graph", "amber", "Graph nodes", totals.nodes.toLocaleString(), "documents, chunks, entities"),
-      stat("zap", pending ? "amber" : "green", "Sync backlog", pending, pending ? "being applied" : "every store in sync")),
+      stat("file", "violet", "Documents", num(docsTotal), `${num(totals.ready || 0)} ready · ${num(totals.failed || 0)} failed`),
+      stat("vector", "blue", "Vectors", num(vectors), plural(all.filter((c) => c.vector).length, "collection")),
+      stat("graph", "amber", "Graph nodes", num(nodes), "documents, chunks, entities and your own"),
+      stat("zap", pending ? "amber" : "green", "Sync backlog", num(pending), pending ? "being applied" : "every store in sync")),
     h("div", { class: "section-title" }, "Engines"),
     h("div", { class: "grid c3" }, Object.entries(st.engines).map(engineCard)),
     h("div", { class: "split" },
       h("div", { class: "stack" }, h("div", { class: "section-title" }, "Collections"),
-        cols.length ? h("div", { class: "grid c2" }, cols.map(collCard)) : noCollections()),
-      h("div", { class: "stack" }, h("div", { class: "section-title" }, "Sync"), consistency)));
+        all.length ? h("div", { class: "grid c2" }, cols.map(collCard), raws.map(rawCard)) : noCollections()),
+      h("div", { class: "stack" }, h("div", { class: "section-title" }, "Sync and activity"), consistency, activity)));
   state.timers.push(setTimeout(() => { if (currentPage() === "overview") route(true); }, 5000));
 };
+
+async function allCollections() {
+  const { collections } = await api("GET", "/v1/collections");
+  const infos = await Promise.all(collections.map((c) => api("GET", collPath(c.name)).catch(() => null)));
+  return collections.map((c, i) => ({ ...c, info: infos[i] }));
+}
+
+const metaText = (v) => (typeof v === "string" ? v : JSON.stringify(v));
 
 view.collections = async (root, arg, actions) => {
   fill(root, skeleton("block", 2));
   const cols = await documentCollections();
   if (!cols.length) { fill(root, noCollections()); return; }
   const name = cols.some((c) => c.name === arg) ? arg : cols[0].name;
-  let statusFilter = "";
-  let text = "";
-  let docs = [];
-  let selected = null;
+  const PAGE = 100;
+  let statusFilter = "", text = "", sort = "created", offset = 0, selected = null, meta = {}, facets = null;
+  let page = { documents: [], total: 0 };
   const listCard = h("div", { class: "card flush" });
-  const filterInput = h("input", { placeholder: "Filter by id or title", class: "grow", "aria-label": "Filter",
-    oninput: (e) => { text = e.target.value.toLowerCase(); draw(); } });
-  const statusSel = h("select", { onchange: (e) => { statusFilter = e.target.value; load(); }, "aria-label": "Status" },
+  const summary = h("div", { class: "stack" });
+  let typing;
+  const filterInput = h("input", { placeholder: "Search ids and titles", class: "grow", "aria-label": "Search documents",
+    oninput: (e) => { clearTimeout(typing); typing = setTimeout(() => { text = e.target.value.trim(); offset = 0; load(); }, 250); } });
+  const statusSel = h("select", { onchange: (e) => { statusFilter = e.target.value; offset = 0; load(); }, "aria-label": "Status" },
     ["", "ready", "processing", "queued", "failed", "deleting"].map((v) => h("option", { value: v }, v || "All statuses")));
+  const sortSel = h("select", { onchange: (e) => { sort = e.target.value; offset = 0; load(); }, "aria-label": "Sort" },
+    [["created", "Oldest first"], ["updated", "Recently changed"], ["id", "By id"], ["chunks", "Most passages"]]
+      .map(([v, l]) => h("option", { value: v }, l)));
+  // the metadata fields worth a column: the most common ones
+  const metaCols = () => (facets ? Object.keys(facets.fields).slice(0, 2) : []);
 
+  function toggleMeta(field, value) {
+    if (field in meta && metaText(meta[field]) === metaText(value)) delete meta[field]; else meta[field] = value;
+    offset = 0; load(); loadFacets();
+  }
   function draw() {
-    const rows = docs.filter((d) => !text || d.id.toLowerCase().includes(text) || (d.title || "").toLowerCase().includes(text));
+    const rows = page.documents;
+    const from = page.total ? offset + 1 : 0, to = offset + rows.length;
+    const active = Object.entries(meta);
     fill(listCard,
       h("div", { class: "card-head" }, h("div", {}, h("h2", {}, name),
-        h("div", { class: "sub" }, `${plural(rows.length, "document")}${text ? " shown" : ""}`)),
-        h("div", { class: "row" }, filterInput, statusSel)),
+        h("div", { class: "sub" }, page.total ? `${num(from)}–${num(to)} of ${num(page.total)} documents` : "no documents match")),
+        h("div", { class: "row" }, filterInput, statusSel, sortSel)),
+      active.length ? h("div", { class: "filters" }, active.map(([k, v]) =>
+        h("button", { class: "chip", type: "button", title: "Remove this filter", onclick: () => toggleMeta(k, v) }, `${k} = ${metaText(v)}  ×`))) : null,
       table([
         { label: "Document", get: (d) => h("div", {}, h("div", { class: "mono" }, d.id), d.title ? h("div", { class: "tiny muted" }, d.title) : null) },
+        ...metaCols().map((k) => ({ label: k, get: (d) => (d.metadata && k in d.metadata
+          ? h("span", { class: "small" }, metaText(d.metadata[k])) : h("span", { class: "muted" }, "-")) })),
         { label: "Status", get: (d) => h("div", { class: "row" }, status(d.status), d.attempts ? pill(`retry ${d.attempts}`, "warn", false) : null) },
         { label: "Version", num: true, get: (d) => (d.live_version && d.live_version !== d.version ? `${d.live_version} → ${d.version}` : d.version) },
         { label: "Chunks", num: true, get: (d) => d.chunks },
         { label: "Entities", num: true, get: (d) => d.entities },
         { label: "Updated", num: true, get: (d) => h("span", { class: "muted", title: new Date(d.updated_at).toLocaleString() }, rel(d.updated_at)) },
       ], rows, { onRow: (d) => { selected = d.id; draw(); openDiagnosis(name, d.id, load); }, selected: (d) => d.id === selected,
-                 emptyView: h("div", { class: "card-pad" }, empty("file", "No documents match", "Add one with the panel on the right.")) }));
+                 emptyView: h("div", { class: "card-pad" }, empty("file", "No documents match", "Change the search or the filters, or add documents.")) }),
+      page.total > PAGE ? h("div", { class: "row between card-pad" },
+        btn("Previous", () => { offset = Math.max(0, offset - PAGE); load(); }),
+        h("span", { class: "small muted" }, `page ${Math.floor(offset / PAGE) + 1} of ${Math.ceil(page.total / PAGE)}`),
+        btn("Next", () => { if (offset + PAGE < page.total) { offset += PAGE; load(); } })) : null);
+  }
+  function drawSummary() {
+    if (!facets) return;
+    const t = facets.totals;
+    const fields = Object.entries(facets.fields);
+    const filtered = Object.keys(meta).length;
+    fill(summary, card(cardHead(filtered ? "In the filtered documents" : "What's inside",
+      filtered ? "Counts within the current filters; click a value to add or remove it" : "Click a value to filter the list"),
+      h("div", { class: "card-pad stack" },
+        h("div", { class: "metric-row" },
+          h("div", { class: "metric" }, h("b", {}, num(t.documents)), h("span", {}, "documents")),
+          h("div", { class: "metric" }, h("b", {}, num(t.chunks)), h("span", {}, "passages")),
+          h("div", { class: "metric" }, h("b", {}, num(t.entities)), h("span", {}, "entity mentions"))),
+        facets.added_by_day.length > 1 ? h("div", { class: "facet" }, h("h3", {}, "Added per day"),
+          columnChart(facets.added_by_day.map((d) => ({ x: d.day, y: d.documents })), { label: (p) => p.x.slice(5), unit: " documents" })) : null,
+        fields.length ? fields.slice(0, 5).map(([k, f]) => h("div", { class: "facet" },
+          h("h3", {}, `${k} · ${num(f.documents)} documents${f.more ? " · top values" : ""}`),
+          barList(f.values.map((v) => ({ label: metaText(v.value), count: v.count, value: v.value })),
+            { onPick: (i) => toggleMeta(k, i.value), active: (i) => k in meta && metaText(meta[k]) === metaText(i.value) })))
+          : h("div", { class: "small muted" }, "No metadata yet. Add it when you upload, e.g. {\"team\": \"support\"}, to filter here and in search."))),
+      uploadCard(name, () => { load(); loadFacets(); }));
   }
   async function load() {
-    const q = statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : "";
-    const r = await guard(() => api("GET", collPath(name, `/documents?limit=500${q}`)));
-    if (r) { docs = r.documents; draw(); }
+    const params = new URLSearchParams({ limit: PAGE, offset, sort });
+    if (statusFilter) params.set("status", statusFilter);
+    if (text) params.set("q", text);
+    if (Object.keys(meta).length) params.set("meta", JSON.stringify(meta));
+    const r = await guard(() => api("GET", collPath(name, `/documents?${params}`)));
+    if (r) { page = r; draw(); }
+  }
+  async function loadFacets() {
+    const params = new URLSearchParams();
+    if (Object.keys(meta).length) params.set("meta", JSON.stringify(meta));
+    facets = await guard(() => api("GET", collPath(name, `/facets?${params}`)));
+    drawSummary(); draw();
   }
 
-  fill(actions, collectionSelect(name, (v) => { location.hash = `collections/${v}`; }), btn("Refresh", load, { ico: "refresh" }));
-  fill(root, h("div", { class: "split" }, listCard, uploadCard(name, load)));
-  await load();
+  fill(actions, collectionSelect(name, (v) => { location.hash = `collections/${v}`; }), btn("Refresh", () => { load(); loadFacets(); }, { ico: "refresh" }));
+  fill(root, h("div", { class: "split" }, listCard, summary));
+  await Promise.all([load(), loadFacets()]);
 };
 
 function uploadCard(name, reload) {
@@ -468,6 +596,7 @@ function hitCard(x, i, query, top, { n, cited } = {}) {
                           : pill(x.via === "sparse" ? "keywords" : x.via === "dense" ? "meaning" : "hybrid", "info", false),
         x.fusion_score !== undefined ? pill("re-ranked", "violet", false) : null,
         cited ? pill("cited", "ok", false) : null,
+        Object.entries(x.metadata || {}).slice(0, 4).map(([k, v]) => h("span", { class: "tiny muted" }, `${k}: ${metaText(v)}`)),
         h("span", { class: "score" }, fmt(x.score, 3), h("span", { class: "bar" }, bar))),
       h("div", { class: "text" }, highlight(passageText(x.text, x.heading), query))));
 }
@@ -520,6 +649,36 @@ view.search = async (root, _arg, actions) => {
   const principals = h("input", { placeholder: "Ask as… user:42, group:hr", class: "grow", "aria-label": "Principals" });
   const rerank = h("select", { "aria-label": "Re-rank", title: "Re-order hits with a cross-encoder: often more precise, slower" },
     [["", "Re-rank: default"], ["true", "Re-rank: on"], ["false", "Re-rank: off"]].map(([v, l]) => h("option", { value: v }, l)));
+  // filters on document metadata: only passages from documents whose fields match (all of them)
+  let where = {}, facets = null;
+  const filterRow = h("div", { class: "row" });
+  const filterChips = h("div", { class: "chips" });
+  async function loadFacets() {
+    facets = await api("GET", collPath(coll, "/facets")).catch(() => null);
+    drawFilters();
+  }
+  function drawFilters() {
+    const fields = facets ? Object.entries(facets.fields) : [];
+    if (!fields.length) { fill(filterRow); fill(filterChips); return; }
+    const field = h("select", { "aria-label": "Filter field" }, h("option", { value: "" }, "Filter by…"),
+      fields.map(([k]) => h("option", { value: k }, k)));
+    const value = h("select", { "aria-label": "Filter value", disabled: true }, h("option", { value: "" }, "value"));
+    field.addEventListener("change", () => {
+      const f = facets.fields[field.value];
+      fill(value, h("option", { value: "" }, "value"),
+        (f ? f.values : []).map((v, i) => h("option", { value: String(i) }, `${metaText(v.value)} (${num(v.count)})`)));
+      value.disabled = !f;
+    });
+    value.addEventListener("change", () => {
+      const f = facets.fields[field.value];
+      if (!f || value.value === "") return;
+      where[field.value] = f.values[Number(value.value)].value;
+      drawFilters();
+    });
+    fill(filterRow, field, value);
+    fill(filterChips, Object.entries(where).map(([k, v]) => h("button", { class: "chip", type: "button", title: "Remove this filter",
+      onclick: () => { delete where[k]; drawFilters(); } }, `${k} = ${metaText(v)}  ×`)));
+  }
 
   function params() {
     const body = { k: Number(k.value), mode: mode.value };
@@ -527,6 +686,7 @@ view.search = async (root, _arg, actions) => {
     if (hops.value !== "") body.graph_hops = Number(hops.value);
     const p = principals.value.split(",").map((x) => x.trim()).filter(Boolean);
     if (p.length) body.principals = p;
+    if (Object.keys(where).length) body.where = { ...where };
     return body;
   }
   const asWho = (body) => (body.principals ? pill(`as ${body.principals.join(", ")}`, "info", false) : null);
@@ -566,14 +726,16 @@ view.search = async (root, _arg, actions) => {
 
   const example = (t) => h("button", { class: "chip", type: "button", onclick: () => { q.value = t; ask(); } }, t);
   q.addEventListener("keydown", (e) => { if (e.key === "Enter") (e.shiftKey ? search : ask)(); });
-  fill(actions, collectionSelect(coll, (v) => { coll = v; fill(results); }));
+  fill(actions, collectionSelect(coll, (v) => { coll = v; where = {}; fill(results); loadFacets(); }));
   fill(root,
     h("div", { class: "search-hero" }, icon("search", "lead"), q, btn("Search", search, { title: "Passages only (Shift+Enter)" }),
       btn("Ask", ask, { kind: "primary", ico: "spark", title: "A cited answer (Enter)" })),
     h("div", { class: "row" }, mode, k, hops, rerank, principals),
+    h("div", { class: "row" }, filterRow, filterChips),
     h("div", { class: "chips" }, h("span", { class: "tiny muted" }, "Try"),
       ["What is the refund policy?", "Where do orders ship from?", "Who leads the project?"].map(example)),
     results);
+  loadFacets();
   results.append(empty("spark", "Ask your documents", "Ask gives a short answer that cites its passages; Search shows the passages alone. Hybrid search combines meaning and keywords; the graph adds connected passages."));
   q.focus();
 };
@@ -603,13 +765,20 @@ view.graph = async (root, _arg, actions) => {
     const r = await guard(() => cypher(`MATCH (e:Entity) ${where}OPTIONAL MATCH (e)<-[:MENTIONS]-(c:Chunk) ` +
       "RETURN e.key, e.name, e.type, count(c) AS mentions ORDER BY mentions DESC LIMIT 60", filter ? { q: filter } : null));
     if (!r) return;
+    const count = await guard(() => cypher("MATCH (e:Entity) RETURN count(e)"));
+    const total = count ? count.rows[0][0] : r.rows.length;
+    const most = Math.max(1, ...r.rows.map((row) => row[3]));
     fill(listCard, h("div", { class: "card-head" }, h("div", {}, h("h2", {}, "Entities"),
-      h("div", { class: "sub" }, `${r.rows.length} shown, most mentioned first`)),
+      h("div", { class: "sub" }, `${num(r.rows.length)} of ${num(total)} shown, most mentioned first`)),
       h("div", { class: "row" }, find, btn("", () => top(find.value.trim()), { ico: "search", title: "Find" }))),
       table([
         { label: "Entity", get: (row) => h("span", { class: "row" }, typeDot(row[2]), row[1]) },
         { label: "Type", get: (row) => h("span", { class: "muted small" }, row[2]) },
-        { label: "Mentions", num: true, get: (row) => row[3] },
+        { label: "Mentions", get: (row) => {
+          const b = h("i"); b.style.width = `${Math.max(2, (row[3] / most) * 100)}%`;
+          return h("div", { class: "bar-row nolabel", title: `${row[1]}: ${num(row[3])} mentions` }, h("span", { class: "bar-track" }, b),
+            h("span", { class: "bar-value" }, num(row[3])));
+        } },
       ], r.rows, { onRow: (row) => focus(row[0], row[1], row[2]),
                    emptyView: h("div", { class: "card-pad" }, empty("wand", "No entities yet",
                      "Entities are the names documents mention (people, projects, companies). Add documents, or set SWSDB_LLM_MODEL for typed entities and relations.")) }));
@@ -1062,6 +1231,38 @@ view.data = async (root, arg, actions) => {
   return dataVectors(root);
 };
 
+// a result worth a chart: a label (or date) column and a number column, a handful of rows
+function resultChart(res) {
+  if (res.rows.length < 2 || res.rows.length > 100 || res.columns.length < 2) return null;
+  const isNum = (v) => v !== null && v !== "" && !Number.isNaN(Number(v)) && typeof v !== "boolean";
+  const yi = res.columns.findIndex((_, i) => i > 0 && res.rows.every((r) => isNum(r[i])));
+  if (yi < 0) return null;
+  const xi = 0;
+  const isDate = res.rows.every((r) => typeof r[xi] === "string" && /^\d{4}-\d{2}-\d{2}/.test(r[xi]));
+  const points = res.rows.map((r) => ({ x: String(r[xi]), y: Number(r[yi]) }));
+  if (isDate) {
+    points.sort((a, b) => a.x.localeCompare(b.x));
+    return card(cardHead(`${res.columns[yi]} by ${res.columns[xi]}`, "From the result above; hover a bar for its value"),
+      h("div", { class: "card-pad" }, columnChart(points, { label: (p) => p.x.slice(0, 10) })));
+  }
+  return card(cardHead(`${res.columns[yi]} by ${res.columns[xi]}`, "From the result above"),
+    h("div", { class: "card-pad" }, barList(points.slice(0, 30).map((p) => ({ label: p.x, count: p.y })))));
+}
+
+function csv(res) {
+  const cell = (v) => {
+    const t = v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+    return /[",\n]/.test(t) ? `"${t.replaceAll('"', '""')}"` : t;
+  };
+  return [res.columns.map(cell).join(","), ...res.rows.map((r) => r.map(cell).join(","))].join("\n");
+}
+
+function download(name, text) {
+  const a = h("a", { href: URL.createObjectURL(new Blob([text], { type: "text/csv" })), download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 async function dataSql(root) {
   const q = h("textarea", { class: "mono", "aria-label": "SQL", spellcheck: "false" });
   q.value = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 1";
@@ -1071,7 +1272,9 @@ async function dataSql(root) {
   async function run() {
     const r = await guard(() => api("POST", "/v1/sql", { query: q.value, read_only: ro.checked, max_rows: 500 }));
     if (!r) return;
-    fill(out, card(cardHead("Result", `${plural(r.row_count, "row")}${r.truncated ? " (first 500)" : ""}`), resultTable(r)));
+    fill(out, resultChart(r), card(cardHead("Result", `${plural(r.row_count, "row")}${r.truncated ? " (first 500)" : ""}`,
+      r.columns.length ? btn("CSV", () => download("result.csv", csv(r)), { ico: "download", title: "Download these rows as CSV" }) : null),
+      resultTable(r)));
   }
   q.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(); });
   const list = await guard(() => api("POST", "/v1/sql", { read_only: true, query:
@@ -1081,11 +1284,18 @@ async function dataSql(root) {
       ? table([{ label: "Table", mono: true, get: (r) => r[0] }], list.rows, { onRow: (r) => {
           q.value = `SELECT * FROM "${String(r[0]).replaceAll('"', '""')}" LIMIT 100`; run(); } })
       : h("div", { class: "card-pad muted small" }, "No tables yet. Create one with CREATE TABLE.")));
+  const examples = [
+    ["Rows per table", "SELECT table_name, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I', table_name), " +
+      "false, true, '')))[1]::text::bigint AS rows FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 2 DESC"],
+    ["Columns", "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() " +
+      "ORDER BY table_name, ordinal_position"]];
   fill(root, h("div", { class: "stack" },
-    card(cardHead("SQL", "Runs as this tenant's own Postgres role: its tables only, never swsdb's catalog or another tenant's.",
+    card(cardHead("SQL", "Runs as this tenant's own Postgres role: its tables only, never swsdb's catalog or another tenant's. " +
+        "A result with a label (or date) and a number gets a chart.",
         h("label", { class: "row small muted" }, ro, "read only"), btn("Run", run, { kind: "primary", ico: "play", title: "Run (Ctrl+Enter)" })),
-      h("div", { class: "card-pad" }, q)),
-    h("div", { class: "split" }, tables, out)));
+      h("div", { class: "card-pad stack" }, q, h("div", { class: "chips" }, examples.map(([label, text]) =>
+        h("button", { class: "chip", type: "button", onclick: () => { q.value = text; run(); } }, label))))),
+    h("div", { class: "split" }, out, tables)));
   run();
 }
 
@@ -1138,11 +1348,64 @@ async function dataVectors(root) {
   const { collections } = await api("GET", "/v1/collections");
   const vecs = collections.filter((c) => c.vector);
   if (!vecs.length) { fill(root, card(empty("vector", "No vector collections yet", "Create a collection with documents or raw vectors."))); return; }
-  let coll = vecs[0].name, next = null, points = [], info = null;
+  let coll = vecs[0].name, next = null, points = [], info = null, where = {}, fields = {}, loading = 0;
   const listCard = h("div", { class: "card flush" });
   const detail = h("div", { class: "stack" });
-  const sel = h("select", { "aria-label": "Collection", onchange: (e) => { coll = e.target.value; load(true); } },
+  const filterBar = h("div", { class: "row" });
+  const sel = h("select", { "aria-label": "Collection", onchange: (e) => { coll = e.target.value; where = {}; load(true); } },
     vecs.map((c) => h("option", { value: c.name }, c.name)));
+
+  // payload fields to filter on, and their common values, from a sample of the collection (document metadata is
+  // under "meta.")
+  async function sampleFields() {
+    const r = await api("POST", collPath(coll, "/points/scroll"), { limit: 500 }).catch(() => null);
+    const out = {}, decimal = new Set();
+    const add = (k, v) => {
+      if (k.startsWith("_") || !["string", "number", "boolean"].includes(typeof v)) return;
+      if (typeof v === "number" && !Number.isInteger(v)) { decimal.add(k); return; }  // exact matches only: no measures
+      if (typeof v === "string" && v.length > 80) return;  // text, not a category
+      const f = (out[k] ||= new Map());
+      const key = JSON.stringify(v);
+      f.set(key, (f.get(key) || 0) + 1);
+    };
+    for (const p of (r ? r.points : [])) {
+      for (const [k, v] of Object.entries(p.payload || {})) {
+        if (k === "meta" && v && typeof v === "object" && !Array.isArray(v)) for (const [mk, mv] of Object.entries(v)) add(`meta.${mk}`, mv);
+        else if (Array.isArray(v)) v.forEach((x) => add(k, x));
+        else add(k, v);
+      }
+    }
+    fields = Object.fromEntries(Object.entries(out)
+      .filter(([k, m]) => !decimal.has(k) && (m.size > 1 || [...m.values()][0] > 1))
+      .map(([k, m]) => [k, [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([v, n]) => ({ value: JSON.parse(v), count: n }))]));
+    drawFilters();
+  }
+  function drawFilters() {
+    const names = Object.keys(fields).sort();
+    const field = h("select", { "aria-label": "Payload field" }, h("option", { value: "" }, names.length ? "Filter by field…" : "No fields to filter on"),
+      names.map((k) => h("option", { value: k }, k)));
+    const listId = `vals-${Math.random().toString(36).slice(2)}`;
+    const values = h("datalist", { id: listId });
+    const value = h("input", { placeholder: "value", list: listId, "aria-label": "Payload value", disabled: true });
+    field.addEventListener("change", () => {
+      fill(values, (fields[field.value] || []).map((v) => h("option", { value: String(v.value) }, `${num(v.count)} in the sample`)));
+      value.disabled = !field.value; value.value = ""; value.focus();
+    });
+    const apply = () => {
+      if (!field.value || value.value === "") return;
+      // keep the value's type: what the sample holds for this field, else a number or true/false when it reads as one
+      const known = (fields[field.value] || []).find((v) => String(v.value) === value.value);
+      let v = known ? known.value : value.value;
+      if (!known && /^-?\d+(\.\d+)?$/.test(v)) v = Number(v);
+      if (!known && (v === "true" || v === "false")) v = v === "true";
+      where[field.value] = v;
+      load(true);
+    };
+    value.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); });
+    fill(filterBar, field, value, btn("Add filter", apply, { ico: "plus" }),
+      Object.entries(where).map(([k, v]) => h("button", { class: "chip", type: "button", title: "Remove this filter",
+        onclick: () => { delete where[k]; load(true); } }, `${k} = ${metaText(v)}  ×`)));
+  }
   const isDocs = () => info && info.documents;
   const preview = (p) => {
     const pl = p.payload || {};
@@ -1150,12 +1413,24 @@ async function dataVectors(root) {
     return clip(JSON.stringify(pl), 110);
   };
   async function load(reset) {
-    if (reset) { next = null; points = []; info = await guard(() => api("GET", collPath(coll))); fill(detail); }
-    const r = await guard(() => api("POST", collPath(coll, "/points/scroll"), { limit: 50, offset: next }));
-    if (!r) return;
+    const filtered = Object.keys(where).length > 0;
+    const mine = ++loading;  // a newer load (another filter, collection or page) replaces this one's result
+    if (reset) {
+      next = null; points = [];
+      const fresh = !info || info.name !== coll;
+      info = await guard(() => api("GET", collPath(coll)));
+      fill(detail);
+      if (fresh) sampleFields(); else drawFilters();
+    }
+    const r = await guard(() => api("POST", collPath(coll, "/points/scroll"),
+      { limit: 50, offset: next, where: filtered ? where : null }));
+    if (!r || mine !== loading) return;
     points = points.concat(r.points); next = r.next;
     const v = info && info.vector;
-    fill(listCard, cardHead("Points", v ? `${v.points} points · ${v.size} dimensions · ${v.distance}${v.sparse ? " · with BM25 keywords" : ""}` : ""),
+    const shape = v ? `${v.size} dimensions · ${v.distance}${v.sparse ? " · with BM25 keywords" : ""}` : "";
+    fill(listCard, cardHead("Points", v ? (filtered
+      ? `${num(points.length)}${next !== null ? "+" : ""} matching the filters, of ${num(v.points)} · ${shape}`
+      : `${num(v.points)} points · ${shape}`) : ""),
       table([{ label: "Id", mono: true, get: (p) => clip(String(p.id), 38) },
              { label: isDocs() ? "Document · chunk · text" : "Payload", get: (p) => h("span", { class: "small" }, preview(p)) },
              ...(isDocs() ? [{ label: "Live", get: (p) => (p.payload.live ? pill("live", "ok") : pill("hidden", "warn")) }] : [])],
@@ -1174,13 +1449,15 @@ async function dataVectors(root) {
         const res = await guard(() => api("POST", collPath(coll, "/query"), { query: String(full.payload.text || ""), k: 8, mode: "dense", graph_hops: 0 }));
         hits = res && res.hits.map((x) => ({ id: x.chunk_id, score: x.score, label: `${x.document} #${x.chunk}  ${clip(String(x.text || ""), 80)}` }));
       } else {
-        const res = vec && await guard(() => api("POST", collPath(coll, "/search"), { vector: vec, limit: 8 }));
+        const res = vec && await guard(() => api("POST", collPath(coll, "/search"),
+          { vector: vec, limit: 8, where: Object.keys(where).length ? where : null }));
         hits = res && res.hits.map((x) => ({ id: x.id, score: x.score, label: clip(JSON.stringify(x.payload || {}), 80) }));
       }
       if (!hits) return;
-      fill(near, card(cardHead("Nearest neighbours", isDocs() ? "by the chunk's text, dense vectors only" : "by this point's vector"),
+      fill(near, card(cardHead("Nearest neighbours", isDocs() ? "by the chunk's text, dense vectors only"
+        : Object.keys(where).length ? "by this point's vector, within the filters" : "by this point's vector"),
         table([{ label: "Id", mono: true, get: (x) => clip(String(x.id), 30) }, { label: "Score", num: true, get: (x) => fmt(x.score) },
-               { label: "", get: (x) => h("span", { class: "small" }, x.label) }], hits)));
+               { label: "", get: (x) => h("span", { class: "small wrap-any" }, x.label) }], hits)));
     }
     fill(detail,
       card(cardHead(clip(String(p.id), 40), isDocs() ? "a chunk of a document" : "a point", btn("Find similar", similar, { kind: "primary", ico: "search" })),
@@ -1191,7 +1468,8 @@ async function dataVectors(root) {
       near);
   }
   fill(root, h("div", { class: "stack" },
-    card(cardHead("Vectors", "Every point of a collection, as the vector store holds it. Read only.", sel)),
+    card(cardHead("Vectors", "Every point of a collection, as the vector store holds it. Read only.", sel),
+      h("div", { class: "card-pad" }, filterBar)),
     h("div", { class: "split" }, listCard, detail)));
   await load(true);
 }

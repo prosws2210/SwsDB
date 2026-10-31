@@ -32,7 +32,7 @@ evaluation sets are 1 to 63 lowercase letters, digits, `-` or `_`.
 |---|---|
 | `POST /v1/collections/{name}/documents` | upload a file (multipart: `file`, optional `id`, `title`, `metadata` and `readers` as JSON) |
 | `POST /v1/collections/{name}/documents/text` | `{"id", "text", "format": "markdown"/"text"/"html", "title", "metadata", "readers"}` |
-| `GET /v1/collections/{name}/documents` | list (`limit`, `offset`, `status`), admin |
+| `GET /v1/collections/{name}/documents` | a page of documents and the total, admin: `limit`, `offset`, `status`, `q` (part of the id or title), `meta` (a JSON object of metadata fields), `sort` (created, updated, id or chunks) |
 | `GET /v1/collections/{name}/documents/{id}` | one document's catalog entry, admin |
 | `DELETE /v1/collections/{name}/documents/{id}` | delete everywhere (queries stop returning it at once) |
 | `POST /v1/collections/{name}/query` | `{"query", "k", "mode": "hybrid"/"dense"/"sparse", "where", "principals", "graph_hops", "graph_k"}` → `{"hits", "graph", "took_ms"}` |
@@ -57,6 +57,8 @@ Document ids may contain `/`; encode them in the path (`a%2Fb`).
 |---|---|
 | `PUT /v1/collections/{name}/points` | `{"points": [{"id", "vector", "payload"}]}` (up to 1000) |
 | `POST /v1/collections/{name}/points/get` | `{"ids": [...]}` |
+| `GET /v1/collections/{name}/facets` | documents by status, by metadata field and value, and by day added; `?meta=` narrows the counts |
+| `GET /v1/activity` | searches and documents indexed per minute on this server over the last hour (`?minutes=`), and search latency; a tenant's key sees its tenant |
 | `POST /v1/collections/{name}/points/scroll` | `{"limit": 50, "offset": null, "where": {...}, "with_vector": false}`: a page of points in id order, and `next` for the following page |
 | `POST /v1/collections/{name}/points/delete` | `{"ids": [...]}` |
 | `POST /v1/collections/{name}/search` | `{"vector", "limit", "where", "with_payload"}` |

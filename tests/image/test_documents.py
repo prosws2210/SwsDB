@@ -247,3 +247,29 @@ def test_a_200_page_pdf_is_ingested_and_cited_by_page(box, tmp_path):
     hit = manual.query("access code for storage vault 137", k=3)[0]
     assert hit["page"] == 137 and "VAULT137X959" in hit["text"], hit
     print(f"\n200-page PDF ({len(pdf) // 1024} KB, {d['chunks']} chunks) ingested in {took:.1f}s")
+
+
+def test_listing_facets_and_activity_for_the_console(box):
+    """Paging with search and metadata filters, counts by metadata value (narrowed by filters), recent activity."""
+    db = client(box)
+    kb = db.create_collection("catalog", documents=True)
+    for i in range(12):
+        kb.add_text(f"t-{i:02d}", f"Ticket {i}: the export of report {i} is missing rows.", title=f"Export ticket {i}",
+                    metadata={"priority": "urgent" if i % 4 == 0 else "low", "team": "data" if i % 2 else "billing"})
+    for i in range(12):
+        kb.wait_ready(f"t-{i:02d}", timeout=300)
+    page = db._call("GET", "/v1/collections/catalog/documents?limit=5&offset=5&sort=id")
+    assert page["total"] == 12 and [d["id"] for d in page["documents"]] == [f"t-{i:02d}" for i in range(5, 10)]
+    found = db._call("GET", "/v1/collections/catalog/documents?q=TICKET%201")  # title, case-insensitive
+    assert {d["id"] for d in found["documents"]} == {"t-01", "t-10", "t-11"}
+    urgent = db._call("GET", '/v1/collections/catalog/documents?meta={"priority":"urgent"}')
+    assert urgent["total"] == 3 and all(d["metadata"]["priority"] == "urgent" for d in urgent["documents"])
+    f = db._call("GET", "/v1/collections/catalog/facets")
+    assert f["totals"]["documents"] == 12 and f["status"] == {"ready": 12}
+    assert {v["value"]: v["count"] for v in f["fields"]["priority"]["values"]} == {"urgent": 3, "low": 9}
+    narrowed = db._call("GET", '/v1/collections/catalog/facets?meta={"priority":"urgent"}')
+    assert {v["value"]: v["count"] for v in narrowed["fields"]["team"]["values"]} == {"billing": 3}
+    kb.query("missing rows", k=3)
+    act = db._call("GET", "/v1/activity?minutes=10")
+    assert len(act["minutes"]) == 10 and act["searches"] >= 1 and act["indexed"] >= 12
+    assert act["latency_ms"]["p50"] is not None

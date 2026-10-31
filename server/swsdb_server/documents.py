@@ -17,7 +17,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -213,16 +213,63 @@ class Documents:
         # have removed it
         return {"deleted": external_id, "status": "deleting"}
 
-    async def list(self, tenant: str, collection: str, limit: int, offset: int, status: str | None) -> dict:
+    SORTS: ClassVar[dict[str, str]] = {
+        "created": "created_at, external_id", "updated": "updated_at DESC, external_id", "id": "external_id",
+        "chunks": "chunks DESC NULLS LAST, external_id"}
+
+    async def list(self, tenant: str, collection: str, limit: int, offset: int, status: str | None,
+                   q: str | None = None, meta: dict | None = None, sort: str = "created") -> dict:
+        """A page of documents. `q` matches the id or title (case-insensitive); `meta` matches metadata fields."""
         await self.collection(tenant, collection)
+        if sort not in self.SORTS:
+            raise StoreError(f"sort must be one of {', '.join(self.SORTS)}")
         where, params = "tenant = %s AND collection = %s", [tenant, collection]
         if status:
             where += " AND status = %s"
             params.append(status)
-        rows = await self.rows(f"SELECT * FROM swsdb.documents WHERE {where} ORDER BY created_at, external_id "  # noqa: S608
+        if q:
+            where += " AND (external_id ILIKE %s OR title ILIKE %s)"
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            params += [like, like]
+        if meta:
+            where += " AND metadata @> %s"
+            params.append(Jsonb(meta))
+        rows = await self.rows(f"SELECT * FROM swsdb.documents WHERE {where} ORDER BY {self.SORTS[sort]} "  # noqa: S608
                                "LIMIT %s OFFSET %s", [*params, limit, offset])
         total = (await self.one(f"SELECT count(*) AS n FROM swsdb.documents WHERE {where}", params))["n"]  # noqa: S608
         return {"documents": [doc_public(r) for r in rows], "total": total}
+
+    async def facets(self, tenant: str, collection: str, keys: int = 8, values: int = 12,
+                     meta: dict | None = None) -> dict:
+        """What the collection holds, for the console: documents by status, by metadata field and value (the most
+        common fields and values), and by the day they were added. `meta` narrows it to matching documents."""
+        await self.collection(tenant, collection)
+        cond, args = "tenant = %s AND collection = %s", [tenant, collection]
+        if meta:
+            cond += " AND metadata @> %s"
+            args.append(Jsonb(meta))
+        status = {r["status"]: r["n"] for r in await self.rows(
+            f"SELECT status, count(*) AS n FROM swsdb.documents WHERE {cond} GROUP BY status", args)}  # noqa: S608
+        top = await self.rows(
+            "SELECT k, count(*) AS n FROM swsdb.documents d, jsonb_object_keys(d.metadata) k "  # noqa: S608
+            f"WHERE {cond} AND jsonb_typeof(d.metadata) = 'object' GROUP BY k ORDER BY n DESC, k LIMIT %s",
+            [*args, keys])
+        fields = {}
+        for row in top:
+            vals = await self.rows(
+                f"SELECT metadata -> %s AS v, count(*) AS n FROM swsdb.documents WHERE {cond} "  # noqa: S608
+                "AND metadata ? %s GROUP BY 1 ORDER BY n DESC LIMIT %s", [row["k"], *args, row["k"], values + 1])
+            fields[row["k"]] = {"documents": row["n"], "values": [{"value": v["v"], "count": v["n"]}
+                                                                for v in vals[:values]],
+                                "more": len(vals) > values}
+        days = await self.rows(
+            "SELECT date_trunc('day', created_at)::date::text AS day, count(*) AS n FROM swsdb.documents "  # noqa: S608
+            f"WHERE {cond} GROUP BY 1 ORDER BY 1 DESC LIMIT 60", args)
+        totals = await self.one(
+            "SELECT count(*) AS documents, coalesce(sum(chunks), 0) AS chunks, coalesce(sum(entities), 0) AS entities, "  # noqa: S608
+            f"coalesce(sum(bytes), 0) AS bytes FROM swsdb.documents WHERE {cond}", args)
+        return {"totals": totals, "status": status, "fields": fields,
+                "added_by_day": [{"day": d["day"], "documents": d["n"]} for d in reversed(days)]}
 
     async def get(self, tenant: str, collection: str, external_id: str) -> dict:
         row = await self.one("SELECT * FROM swsdb.documents WHERE id = %s",
@@ -321,6 +368,7 @@ class Documents:
             h.pop("_version", None)
         took = time.perf_counter() - t_start
         observe.QUERY_SECONDS.labels(mode, "yes" if graph_info["used"] else "no").observe(took)
+        observe.ACTIVITY.query(tenant, took)
         observe.QUERY_HITS.observe(len(hits))
         return {"hits": hits, "graph": graph_info, "reranked": bool(rerank), "took_ms": round(took * 1000, 1)}
 

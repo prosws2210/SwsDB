@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import answer as answer_mod
+from . import observe
 from .auth import Caller
 from .documents import Documents
 from .evaluate import Evaluator
@@ -455,12 +456,42 @@ def router(caller) -> APIRouter:
                                    body.metadata, body.readers)
 
     @r.get("/collections/{name}/documents", tags=["documents"])
-    async def list_documents(limit: int = 100, offset: int = 0, status: str | None = None,
+    async def list_documents(limit: int = 100, offset: int = 0, status: str | None = None, q: str | None = None,
+                             meta: str | None = None, sort: str = "created",
                              name: str = Depends(collection_name), t: str = Depends(tenant), e: Engines = Depends(),
                              _: str = Depends(admin)):
+        """`q`: part of the id or title. `meta`: a JSON object of metadata fields to match, e.g. {"team": "Search"}.
+        `sort`: created | updated | id | chunks."""
         if not 1 <= limit <= 1000 or offset < 0:
             raise HTTPException(422, "limit must be 1-1000 and offset >= 0")
-        return await e.docs.list(t, name, limit, offset, status)
+        try:
+            where = json.loads(meta) if meta else None
+        except json.JSONDecodeError as err:
+            raise HTTPException(422, f"meta must be a JSON object: {err}") from None
+        if where is not None and not isinstance(where, dict):
+            raise HTTPException(422, "meta must be a JSON object")
+        return await e.docs.list(t, name, limit, offset, status, q=q, meta=where, sort=sort)
+
+    @r.get("/collections/{name}/facets", tags=["documents"])
+    async def document_facets(meta: str | None = None, name: str = Depends(collection_name), t: str = Depends(tenant),
+                              e: Engines = Depends(), _: str = Depends(admin)):
+        """Documents by status, metadata field and value, and day added (the console's collection summary). `meta`
+        (a JSON object of metadata fields) counts only the documents that match it."""
+        try:
+            where = json.loads(meta) if meta else None
+        except json.JSONDecodeError as err:
+            raise HTTPException(422, f"meta must be a JSON object: {err}") from None
+        if where is not None and not isinstance(where, dict):
+            raise HTTPException(422, "meta must be a JSON object")
+        return await e.docs.facets(t, name, meta=where)
+
+    @r.get("/activity", tags=["admin"])
+    async def activity(minutes: int = 60, c: Caller = Depends(caller), _: str = Depends(require_key)):
+        """Searches and indexed documents per minute on this server over the last hour, and search latency. A
+        tenant's key sees its own tenant; a key from the environment sees every tenant."""
+        if not 1 <= minutes <= 60:
+            raise HTTPException(422, "minutes must be 1-60")
+        return observe.ACTIVITY.summary(c.tenant, minutes)
 
     @r.get("/collections/{name}/documents/{doc_id:path}", tags=["documents"])
     async def get_document(doc_id: str, name: str = Depends(collection_name), t: str = Depends(tenant),

@@ -41,6 +41,49 @@ OUTBOX_OLDEST = Gauge("swsdb_outbox_oldest_seconds", "Age of the oldest pending 
 RECONCILE_ISSUES = Gauge("swsdb_reconcile_issues", "Issues found by the last reconciliation", registry=REGISTRY)
 
 
+class Activity:
+    """The last hour of searches and indexed documents, per tenant, for the console (Prometheus keeps the totals).
+    In memory and per server: it starts empty after a restart."""
+
+    WINDOW_S = 3600
+
+    def __init__(self):
+        from collections import deque
+        self.events: deque = deque(maxlen=200_000)  # (time, tenant, kind, seconds)
+
+    def query(self, tenant: str, seconds: float) -> None:
+        self.events.append((time.time(), tenant, "search", seconds))
+
+    def ingest(self, tenant: str, ok: bool) -> None:
+        self.events.append((time.time(), tenant, "indexed" if ok else "failed", 0.0))
+
+    def summary(self, tenant: str | None, minutes: int = 60) -> dict:
+        now = time.time()
+        start = now - minutes * 60
+        while self.events and self.events[0][0] < now - self.WINDOW_S:
+            self.events.popleft()
+        buckets = [{"minute": int((start // 60 + i + 1) * 60), "search": 0, "indexed": 0, "failed": 0}
+                   for i in range(minutes)]
+        lat: list[float] = []
+        for ts, t, kind, secs in self.events:
+            if ts < start or (tenant is not None and t != tenant):
+                continue
+            i = min(int((ts - start) // 60), minutes - 1)
+            buckets[i][kind] += 1
+            if kind == "search":
+                lat.append(secs)
+        lat.sort()
+
+        def q(p: float) -> float | None:
+            return round(lat[min(len(lat) - 1, int(p * len(lat)))] * 1000, 1) if lat else None
+
+        return {"minutes": buckets, "searches": len(lat), "indexed": sum(b["indexed"] for b in buckets),
+                "failed": sum(b["failed"] for b in buckets), "latency_ms": {"p50": q(0.5), "p95": q(0.95)}}
+
+
+ACTIVITY = Activity()
+
+
 class HttpMetrics(BaseHTTPMiddleware):
     """Requests by route template (not raw path, so ids don't explode the series count), and a trace span each."""
 
