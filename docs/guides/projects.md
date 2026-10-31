@@ -128,7 +128,7 @@ SQLAlchemy, Django, Prisma 6 and 7, and psycopg run against a real swsdb in its 
     ```
 
 The login works in the project's own schema, and tables need no schema prefix. Those are the same tables you see in the
-console's **Data** page, query with `/v1/sql`, and serve through the [Data API](../reference/api.md#data-api-and-functions).
+console's **Tables** page, query with `/v1/sql`, and serve through the [Data API](../reference/api.md#data-api-and-functions).
 Everything a migration creates belongs to the project.
 
 A project may also create databases of its own, such as Django's test database and Prisma's shadow database. They

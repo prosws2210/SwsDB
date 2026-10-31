@@ -64,6 +64,7 @@ const ICONS = {
   moon: [["path", { d: "M20.5 13.5A8.5 8.5 0 1 1 10.5 3.5a6.5 6.5 0 0 0 10 10z" }]],
   play: [["path", { d: "M7 5v14l11-7z" }]],
   file: [["path", { d: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" }], ["path", { d: "M14 3v5h5M9 13h6M9 17h4" }]],
+  table: [["rect", { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2 }], ["path", { d: "M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10" }]],
   vector: [["circle", { cx: 12, cy: 12, r: 2 }], ["path", { d: "M12 4v3M12 17v3M4 12h3M17 12h3M6.3 6.3l2.1 2.1M15.6 15.6l2.1 2.1M6.3 17.7l2.1-2.1M15.6 8.4l2.1-2.1" }]],
   clock: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M12 7v5l3.5 2" }]],
   shield: [["path", { d: "M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6z" }], ["path", { d: "m9 12 2 2 4-4" }]],
@@ -276,22 +277,32 @@ function columnChart(points, { label = (p) => p.x, height = 120, unit = "", widt
 
 const PAGES = {
   overview: { title: "Overview", icon: "overview", sub: "Health of the engines, how far every store is behind, and your collections." },
-  collections: { title: "Collections", icon: "database", sub: "Documents, their status in every store, and why anything isn't searchable." },
+  collections: { title: "Collections", icon: "file", sub: "Documents, their status in every store, and why anything isn't searchable." },
   search: { title: "Search", icon: "search", sub: "Ask questions as any user and see how each passage was found." },
-  graph: { title: "Graph explorer", icon: "graph", sub: "Entities extracted from your documents, how they relate and where they're mentioned." },
-  reports: { title: "Reports", icon: "eval", sub: "Saved queries pinned as live charts: your own dashboard, run fresh each time." },
-  data: { title: "Data", icon: "file", sub: "Look at the raw data: tables row by row, SQL, the graph with Cypher, and every vector point. Through the API, with your key's permissions." },
+  tables: { title: "Tables", icon: "table", engine: "sql", sub: "Tabular data: your tables row by row, their schema, functions and views, and SQL." },
+  vectors: { title: "Vectors", icon: "vector", engine: "vector", sub: "Vector data: every collection's points, configuration, indexes, memory and index quality." },
+  graph: { title: "Graph", icon: "graph", engine: "graph", sub: "Graph data: the entities extracted from your documents, and every graph with Cypher." },
+  reports: { needs: "sql", title: "Reports", icon: "eval", sub: "Saved queries pinned as live charts: your own dashboard, run fresh each time." },
   eval: { title: "Evaluation", icon: "eval", sub: "Measure retrieval on your own questions and compare configurations with numbers." },
   advisors: { title: "Advisors", icon: "shield", sub: "Security and performance checks of this server and tenant, each with what to do about it." },
   logs: { title: "Logs", icon: "clock", sub: "Recent API requests on this server and where the time goes, route by route." },
-  users: { title: "Users", icon: "key", sub: "Your app's end users: who may sign in, their groups, and how long a sign-in lasts." },
-  policies: { title: "Policies", icon: "shield", sub: "Row-level security: which tables and functions signed-in users reach, and which rows." },
-  storage: { title: "Storage", icon: "archive", sub: "Files in buckets, kept in Postgres with everything else; each user owns a folder." },
+  users: { needs: "sql", title: "Users", icon: "key", sub: "Your app's end users: who may sign in, their groups, and how long a sign-in lasts." },
+  policies: { needs: "sql", title: "Policies", icon: "shield", sub: "Row-level security: which tables and functions signed-in users reach, and which rows." },
+  storage: { needs: "sql", title: "Storage", icon: "archive", sub: "Files in buckets, kept in Postgres with everything else; each user owns a folder." },
   keys: { title: "API keys", icon: "key", sub: "Keys for one tenant each: make them, see when they were last used, revoke them." },
   backups: { title: "Backups", icon: "archive", sub: "Snapshots of every engine at one consistent point, scheduled backups and their copies in S3." },
   doctor: { title: "Doctor", icon: "doctor", sub: "Check that the vector store and the graph agree with Postgres, the source of truth, and repair drift." },
 };
 const view = {};
+// the engine behind each kind of data, by the name its maker uses (from /readyz, which needs no key)
+const ENGINE_NAMES = { postgres: "PostgreSQL", qdrant: "Qdrant", falkordb: "FalkorDB", pgvector: "pgvector", age: "Apache AGE", neo4j: "Neo4j" };
+const engineOf = (cap) => { const e = state.engines && state.engines[cap]; return e ? ENGINE_NAMES[e.engine] || e.engine : null; };
+// a page's own tabs, kept in the address: #page/tab/...
+function pageTabs(page, current, tabs) {
+  return h("div", { class: "tabs", role: "tablist" }, tabs.map(([k, label]) =>
+    h("button", { type: "button", role: "tab", class: k === current ? "on" : null, "aria-selected": k === current ? "true" : "false",
+                  onclick: () => { location.hash = `${page}/${k}`; } }, label)));
+}
 
 view.overview = async (root, _arg, actions) => {
   fill(actions, btn("Refresh", () => route(), { ico: "refresh" }));
@@ -376,7 +387,7 @@ view.overview = async (root, _arg, actions) => {
   // collections you manage yourself (raw vectors, graphs): open them in the data browser
   const rawCard = (c) => {
     const v = c.info && c.info.vector, g = c.info && c.info.graph;
-    return h("div", { class: "card hover coll-card", onclick: () => { location.hash = v ? "data/vectors" : "data/cypher"; } },
+    return h("div", { class: "card hover coll-card", onclick: () => { location.hash = v ? `vectors/${encodeURIComponent(c.name)}` : "graph/cypher"; } },
       h("div", { class: "row between" }, h("div", { class: "name" }, c.name),
         pill(v && g ? "vectors + graph" : v ? "vectors" : "graph", "", false)),
       h("div", { class: "nums" },
@@ -754,7 +765,16 @@ const TYPE_COLORS = { Person: "#60a5fa", Organization: "#a78bfa", Product: "#34d
                       Policy: "#fb923c", Technology: "#22d3ee", Event: "#f87171", Other: "#94a3b8" };
 const typeDot = (t) => { const d = h("span", { class: "type-dot" }); d.style.background = TYPE_COLORS[t] || TYPE_COLORS.Other; return d; };
 
-view.graph = async (root, _arg, actions) => {
+// Graph: #graph (the browser), #graph/entities (what documents mention)
+view.graph = async (root, arg, actions) => {
+  const tab = (arg || "").split("/")[0] === "entities" ? "entities" : "browser";
+  fill(actions, pageTabs("graph", tab, [["browser", "Browser"], ["entities", "Entities"]]));
+  fill(root, skeleton("block", 2));
+  if (tab === "entities") return graphEntities(root, actions);
+  return graphBrowser(root, actions);
+};
+
+async function graphEntities(root, actions) {
   fill(root, skeleton("block", 2));
   const [st, all] = await Promise.all([api("GET", "/v1/status"), documentCollections()]);
   if (st.engines.graph && st.engines.graph.engine === "neo4j") {
@@ -819,7 +839,7 @@ view.graph = async (root, _arg, actions) => {
   }
 
   find.addEventListener("keydown", (e) => { if (e.key === "Enter") top(find.value.trim()); });
-  fill(actions, collectionSelect(coll, (v) => { coll = v; fill(detail); top(); }));
+  fill(actions, pageTabs("graph", "entities", [["browser", "Browser"], ["entities", "Entities"]]), collectionSelect(coll, (v) => { coll = v; fill(detail); top(); }));
   fill(root, h("div", { class: "split" }, listCard, detail));
   await top();
 };
@@ -1226,24 +1246,314 @@ function forceGraph({ nodes, edges }, onPick) {
   return h("div", {}, svg, legend);
 }
 
-function dataTabs(current, onPick) {
-  return h("div", { class: "tabs", role: "tablist" }, [["tables", "Tables"], ["schema", "Schema"], ["database", "Database"], ["sql", "SQL"], ["cypher", "Cypher"], ["vectors", "Vectors"]].map(([k, label]) =>
-    h("button", { class: k === current ? "on" : null, role: "tab", "aria-selected": k === current ? "true" : "false",
-                  onclick: () => onPick(k) }, label)));
+// ------------------------------------------------------------------ graph browser: the ideas of FalkorDB's own browser
+
+const GRAPH_COLORS = ["#8b7bff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#22d3ee", "#fb923c", "#a3e635", "#e879f9", "#f87171"];
+
+// positions for a graph: Fruchterman-Reingold, then fitted to the canvas
+function layoutGraph(nodes, edges, W, H) {
+  const pos = new Map(nodes.map((n, i) => {
+    const a = (2 * Math.PI * i) / Math.max(nodes.length, 1);
+    return [String(n.id), { x: W / 2 + 160 * Math.cos(a), y: H / 2 + 140 * Math.sin(a), vx: 0, vy: 0 }];
+  }));
+  const P = [...pos.values()];
+  const big = P.length > 40;  // many small clusters (a documents graph): more room between them, less pull inward
+  const k = (big ? 1.15 : 0.7) * Math.sqrt((W * H) / Math.max(P.length, 1));
+  const pull = big ? 0.06 : 0.25;
+  let temp = W / 8;
+  for (let it = 0; it < 300; it++) {
+    for (const p of P) { p.vx = 0; p.vy = 0; }
+    for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
+      const a = P[i], b = P[j], dx = a.x - b.x, dy = a.y - b.y, d = Math.sqrt(dx * dx + dy * dy) || 0.1, f = (k * k) / d;
+      a.vx += (dx / d) * f; a.vy += (dy / d) * f; b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+    }
+    for (const e of edges) {
+      const a = pos.get(String(e.src)), b = pos.get(String(e.dst));
+      if (!a || !b || a === b) continue;
+      const dx = a.x - b.x, dy = a.y - b.y, d = Math.sqrt(dx * dx + dy * dy) || 0.1, f = (d * d) / k;
+      a.vx -= (dx / d) * f; a.vy -= (dy / d) * f; b.vx += (dx / d) * f; b.vy += (dy / d) * f;
+    }
+    for (const p of P) {
+      p.vx += (W / 2 - p.x) * pull; p.vy += (H / 2 - p.y) * pull;
+      const d = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1, step = Math.min(d, temp);
+      p.x += (p.vx / d) * step; p.y += (p.vy / d) * step;
+    }
+    temp = Math.max(1, temp * 0.97);
+  }
+  if (P.length) {
+    const xs = P.map((p) => p.x), ys = P.map((p) => p.y);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const sc = Math.min((W - 160) / ((x1 - x0) || 1), (H - 100) / ((y1 - y0) || 1), 2.2);
+    const ox = (W - (x1 - x0) * sc) / 2, oy = (H - (y1 - y0) * sc) / 2;
+    for (const p of P) { p.x = ox + (p.x - x0) * sc; p.y = oy + (p.y - y0) * sc; }
+    // then nudge apart whatever still overlaps, so every node and its name can be seen
+    const minD = P.length > 60 ? 34 : 46;
+    for (let it = 0; it < 60; it++) {
+      let moved = false;
+      for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
+        const a = P[i], b = P[j], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
+        if (d >= minD) continue;
+        const push = (minD - d) / 2, ux = d ? dx / d : Math.cos(i + j), uy = d ? dy / d : Math.sin(i + j);
+        a.x -= ux * push; a.y -= uy * push; b.x += ux * push; b.y += uy * push; moved = true;
+      }
+      if (!moved) break;
+    }
+  }
+  return pos;
 }
 
-view.data = async (root, arg, actions) => {
+// an interactive drawing: click a node (or an edge) to select it and light up its neighbours, double-click a node to
+// expand it, wheel to zoom, drag the background to pan
+function graphCanvas(g, { colorOf, onSelect, onExpand, search = "", selectedId = null }) {
+  const W = 1200, H = 640;
+  const pos = layoutGraph(g.nodes, g.edges, W, H);
+  const svg = s("svg", { class: "gcanvas", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${g.nodes.length} nodes, ${g.edges.length} relationships` });
+  const defs = s("defs");
+  defs.append(s("marker", { id: "garrow", viewBox: "0 0 10 10", refX: 22, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
+    s("path", { d: "M0,0 L10,5 L0,10 z", class: "garrow" })));
+  const world = s("g");
+  svg.append(defs, world);
+  const near = new Set();
+  if (selectedId != null) {
+    near.add(String(selectedId));
+    for (const e of g.edges) {
+      if (String(e.src) === String(selectedId)) near.add(String(e.dst));
+      if (String(e.dst) === String(selectedId)) near.add(String(e.src));
+      if (String(e.id) === String(selectedId)) { near.add(String(e.src)); near.add(String(e.dst)); }
+    }
+  }
+  const q = search.trim().toLowerCase();
+  const hits = (n) => q && (nodeName(n).toLowerCase().includes(q) || JSON.stringify(n.properties || {}).toLowerCase().includes(q) || n.labels.join(" ").toLowerCase().includes(q));
+  const dim = (id) => (selectedId != null && !near.has(String(id))) || (q && !hits(g.nodes.find((n) => String(n.id) === String(id)) || { labels: [], properties: {} }));
+  const pairs = new Map();
+  for (const e of g.edges) {
+    const a = pos.get(String(e.src)), b = pos.get(String(e.dst));
+    if (!a || !b) continue;
+    const key = [e.src, e.dst].sort().join("|");
+    const n = pairs.get(key) || 0; pairs.set(key, n + 1);
+    const bend = n === 0 ? 0 : (n % 2 ? 1 : -1) * Math.ceil(n / 2) * 28;
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+    const cx = mx - (dy / len) * bend, cy = my + (dx / len) * bend;
+    const faded = selectedId != null ? !(near.has(String(e.src)) && near.has(String(e.dst)) && (String(e.src) === String(selectedId) || String(e.dst) === String(selectedId) || String(e.id) === String(selectedId))) : !!q;
+    const path = s("path", { d: a === b ? `M${a.x},${a.y} c 40,-50 60,10 0,0` : `M${a.x},${a.y} Q${cx},${cy} ${b.x},${b.y}`,
+      class: `gedge${faded ? " faded" : ""}${String(e.id) === String(selectedId) ? " on" : ""}`, "marker-end": "url(#garrow)" });
+    const hit = s("path", { d: path.getAttribute("d"), class: "gedge-hit" }, s("title", {}, e.type));
+    hit.addEventListener("click", (ev) => { ev.stopPropagation(); onSelect({ kind: "edge", item: e }); });
+    world.append(path, hit);
+    if (g.edges.length <= 40) world.append(s("text", { x: (mx + cx) / 2, y: (my + cy) / 2 - 4, "text-anchor": "middle", class: `gedge-label${faded ? " faded" : ""}` }, e.type));
+  }
+  for (const n of g.nodes) {
+    const p = pos.get(String(n.id));
+    const name = nodeName(n);
+    const node = s("g", { class: `gnode${dim(n.id) ? " faded" : ""}${String(n.id) === String(selectedId) ? " on" : ""}${q && hits(n) ? " hit" : ""}`, transform: `translate(${p.x.toFixed(1)},${p.y.toFixed(1)})` },
+      s("title", {}, `${n.labels.join(":")} · ${name}`), s("circle", { r: g.nodes.length > 60 ? 9 : 13, fill: colorOf(n.labels[0] || "") }),
+      g.nodes.length > 60 && n.labels.includes("Chunk") ? null
+        : s("text", { y: 28, "text-anchor": "middle", class: "gnode-label" }, name.length > 22 ? `${name.slice(0, 21)}…` : name));
+    node.addEventListener("click", (ev) => { ev.stopPropagation(); onSelect({ kind: "node", item: n }); });
+    node.addEventListener("dblclick", (ev) => { ev.stopPropagation(); onExpand(n); });
+    world.append(node);
+  }
+  // zoom and pan
+  let view = { x: 0, y: 0, w: W, h: H };
+  const apply = () => svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`);
+  const zoom = (f, cx = view.x + view.w / 2, cy = view.y + view.h / 2) => {
+    const w = Math.min(W * 4, Math.max(W / 8, view.w * f)), h = w * (H / W);
+    view = { x: cx - (cx - view.x) * (w / view.w), y: cy - (cy - view.y) * (h / view.h), w, h }; apply();
+  };
+  svg.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    const r = svg.getBoundingClientRect();
+    zoom(ev.deltaY > 0 ? 1.15 : 1 / 1.15, view.x + ((ev.clientX - r.left) / r.width) * view.w, view.y + ((ev.clientY - r.top) / r.height) * view.h);
+  }, { passive: false });
+  let drag = null;
+  svg.addEventListener("pointerdown", (ev) => { if (ev.target === svg) { drag = { x: ev.clientX, y: ev.clientY, v: { ...view } }; svg.setPointerCapture(ev.pointerId); } });
+  svg.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const r = svg.getBoundingClientRect();
+    view = { ...drag.v, x: drag.v.x - ((ev.clientX - drag.x) / r.width) * drag.v.w, y: drag.v.y - ((ev.clientY - drag.y) / r.height) * drag.v.h }; apply();
+  });
+  svg.addEventListener("pointerup", () => { drag = null; });
+  svg.addEventListener("click", () => onSelect(null));
+  return { svg, zoomIn: () => zoom(1 / 1.3), zoomOut: () => zoom(1.3), fit: () => { view = { x: 0, y: 0, w: W, h: H }; apply(); } };
+}
+
+const valueType = (v) => (v === null ? "null" : Array.isArray(v) ? "list" : typeof v === "object" ? "map" : typeof v === "number" ? (Number.isInteger(v) ? "integer" : "float") : typeof v);
+
+async function graphBrowser(root, actions) {
+  const { collections } = await api("GET", "/v1/collections");
+  const graphs = collections.filter((c) => c.graph);
+  const st = await api("GET", "/v1/status").catch(() => null);
+  if (st && st.engines.graph && st.engines.graph.engine === "neo4j") {
+    fill(root, card(empty("graph", "The browser needs pass-through Cypher", "With Neo4j as the graph engine, collections share one Neo4j database, so swsdb runs only its own graph queries. Browse the graph in Neo4j's own browser."))); return;
+  }
+  if (!graphs.length) { fill(root, card(empty("graph", "No graphs yet", "Create a collection with graph: true, or a documents collection while the graph engine is enabled."))); return; }
+  const admin = (await role()) === "admin";
+  const remembered = (() => { try { return localStorage.getItem(`swsdb.graph.${state.tenant}`); } catch { return null; } })();
+  let coll = graphs.some((c) => c.name === remembered) ? remembered : graphs[0].name;
+  let info = null, result = null, g = { nodes: [], edges: [] }, selected = null, mode = "graph", tookMs = null, search = "";
+  const colors = new Map();
+  const colorOf = (label) => { if (!colors.has(label)) colors.set(label, GRAPH_COLORS[colors.size % GRAPH_COLORS.length]); return colors.get(label); };
+  const side = h("div", { class: "gb-side" });
+  const queryIn = h("textarea", { class: "mono gb-query", rows: 1, spellcheck: "false", "aria-label": "Cypher query", placeholder: "Type a Cypher query, e.g. MATCH (n) RETURN n LIMIT 50" });
+  const historyKey = `swsdb.cypher.history.${state.tenant}`;
+  const loadHistory = () => { try { return JSON.parse(localStorage.getItem(historyKey) || "[]"); } catch { return []; } };
+  const historySel = h("select", { "aria-label": "Recent queries", class: "gb-history", onchange: (e) => { if (e.target.value) { queryIn.value = e.target.value; run(); } e.target.value = ""; } });
+  const drawHistory = () => fill(historySel, h("option", { value: "" }, "Recent"), loadHistory().map((x) => h("option", { value: x }, clip(x, 70))));
+  const ro = h("input", { type: "checkbox", checked: true, "aria-label": "Read only" });
+  const stage = h("div", { class: "gb-stage" });
+  const panel = h("div", { class: "gb-panel" });
+  const status = h("div", { class: "gb-status" });
+  const searchIn = h("input", { placeholder: "Search for element", class: "gb-search", "aria-label": "Search for element" });
+  searchIn.addEventListener("input", () => { search = searchIn.value; draw(); });
+
+  function chip(label, count, color, onclick, title) {
+    const dot = h("i"); if (color) dot.style.background = color;
+    return h("button", { type: "button", class: "gb-chip", onclick, title }, color ? dot : null, label, count != null ? h("b", {}, num(count)) : null);
+  }
+  function drawSide() {
+    fill(side,
+      h("div", { class: "gb-h" }, "Graph Info"),
+      h("select", { "aria-label": "Graph", onchange: (e) => { coll = e.target.value; try { localStorage.setItem(`swsdb.graph.${state.tenant}`, coll); } catch { /* private window */ } open(); } },
+        graphs.map((c) => h("option", { value: c.name, selected: c.name === coll ? "selected" : null }, c.name))),
+      info ? [
+        info.memory_bytes != null ? h("div", { class: "gb-line" }, h("span", {}, "Memory"), h("b", {}, info.memory_bytes < 1024 * 1024 ? "< 1 MB" : bytesText(info.memory_bytes))) : null,
+        h("div", { class: "gb-line" }, h("span", {}, "Nodes"), h("b", {}, num(info.nodes))),
+        h("div", { class: "gb-chips" }, chip("*", null, null, () => runQ("MATCH (n) RETURN n LIMIT 100"), "Every node"),
+          info.labels.map((l) => chip(l.name || "(no label)", l.count, colorOf(l.name), () => runQ(`MATCH (n:${cypherName(l.name)}) RETURN n LIMIT 100`), `Show ${l.name} nodes`))),
+        h("div", { class: "gb-line" }, h("span", {}, "Edges"), h("b", {}, num(info.edges))),
+        h("div", { class: "gb-chips" }, chip("*", null, null, () => runQ("MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 100"), "Every relationship"),
+          info.relationships.map((r) => chip(r.name, r.count, null, () => runQ(`MATCH (a)-[r:${cypherName(r.name)}]->(b) RETURN a, r, b LIMIT 100`), `Show ${r.name} relationships`))),
+        h("div", { class: "gb-line" }, h("span", {}, "Property keys"), h("b", {}, num(info.property_keys.length))),
+        h("div", { class: "gb-keys" }, info.property_keys.map((k) => h("span", { class: "vtag" }, k))),
+      ] : skeleton("block", 2));
+  }
+  function drawPanel() {
+    if (!selected) { fill(panel); panel.classList.remove("open"); return; }
+    panel.classList.add("open");
+    const { kind, item } = selected;
+    const props = Object.entries(item.properties || {});
+    fill(panel,
+      h("div", { class: "row between" }, h("b", {}, kind === "node" ? "Node Data" : "Edge Data"), btn("", () => { selected = null; draw(); }, { ico: "x", title: "Close" })),
+      h("div", { class: "small muted" }, `ID: ${item.id} · ${plural(props.length, "attribute")}`),
+      h("div", { class: "gb-chips" }, kind === "node" ? item.labels.map((l) => chip(l, null, colorOf(l))) : chip(item.type, null, null),
+        kind === "edge" ? h("span", { class: "small muted" }, `${item.src} → ${item.dst}`) : null),
+      props.length ? table([{ label: "Key", mono: true, get: ([k]) => k }, { label: "Value", get: ([, v]) => h("span", { class: "wrap-any small" }, typeof v === "string" ? v : JSON.stringify(v)) },
+        { label: "Type", get: ([, v]) => h("span", { class: "tiny muted" }, valueType(v)) }], props) : h("div", { class: "small muted" }, "No properties"),
+      kind === "node" ? h("div", { class: "row" }, btn("Expand neighbours", () => expand(item), { ico: "graph" }), copyButton(JSON.stringify(item, null, 2))) : copyButton(JSON.stringify(item, null, 2)));
+  }
+  function draw() {
+    const views = h("div", { class: "gb-views" }, [["graph", "Graph", "graph"], ["table", "Table", "table"], ["schema", "Schema", "database"]].map(([k, l, ico]) =>
+      h("button", { type: "button", class: mode === k ? "on" : null, title: l, onclick: () => { mode = k; selected = null; draw(); } }, icon(ico), l)));
+    let body, tools = [];
+    if (mode === "table") {
+      body = result && result.columns.length ? h("div", { class: "gb-table" }, resultTable(result)) : h("div", { class: "card-pad muted small" }, result ? "The query returned no rows." : "Run a query.");
+      tools = result && result.columns.length ? [btn("CSV", () => download(`${coll}.csv`, csv({ columns: result.columns, rows: result.rows.map((r) => r.map((v) => (v && typeof v === "object" ? JSON.stringify(v) : v))) })), { ico: "download" })] : [];
+    } else {
+      const shown = mode === "schema" ? schemaGraph() : g;
+      if (!shown.nodes.length) {
+        body = h("div", { class: "gb-empty" }, empty("graph", mode === "schema" ? "No schema yet" : result ? "Nothing to draw" : "Pick a label or run a query",
+          mode === "schema" ? "The graph has no relationships." : result ? "The result has no nodes: see the Table view." : "Click a label or a relationship type on the left."));
+      } else {
+        const c = graphCanvas(shown, { colorOf: (l) => colorOf(l), search: mode === "graph" ? search : "", selectedId: selected ? selected.item.id : null,
+          onSelect: (x) => { if (mode === "schema") return; selected = x; draw(); }, onExpand: (n) => { if (mode === "graph") expand(n); } });
+        const legend = h("div", { class: "gb-legend" },
+          h("div", {}, h("div", { class: "gb-h2" }, "Labels"), [...new Set(shown.nodes.map((n) => n.labels[0] || ""))].map((l) => { const i = h("i"); i.style.background = colorOf(l); return h("div", {}, i, l || "(no label)"); })),
+          mode === "graph" ? h("div", {}, h("div", { class: "gb-h2" }, "Relationships"), [...new Set(shown.edges.map((e) => e.type))].map((t) => h("div", {}, h("span", { class: "gb-line-ico" }), t))) : null);
+        body = h("div", { class: "gb-canvas-wrap" }, mode === "graph" ? searchIn : null, legend, c.svg, panel);
+        tools = [btn("", c.zoomIn, { ico: "plus", title: "Zoom in" }), btn("", c.zoomOut, { ico: "x", title: "Zoom out" }), btn("Fit", c.fit, { ico: "refresh", title: "Fit to view" })];
+      }
+    }
+    fill(status, views, h("span", { class: "grow" }), tools,
+      mode === "schema" && info ? h("span", { class: "small muted" }, `Labels: ${info.labels.length} · Relationship types: ${info.relationships.length}`)
+        : h("span", { class: "small muted" }, `Nodes: ${num(g.nodes.length)} · Edges: ${num(g.edges.length)}${tookMs != null ? ` · ${tookMs} ms` : ""}`));
+    fill(stage, body);
+    drawPanel();
+  }
+  function schemaGraph() {
+    if (!info) return { nodes: [], edges: [] };
+    const labels = new Map(info.labels.map((l) => [l.name, { id: `L:${l.name}`, labels: [l.name], properties: { name: l.name || "(no label)", nodes: l.count } }]));
+    for (const e of info.schema) for (const x of [e.from, e.to]) if (!labels.has(x)) labels.set(x, { id: `L:${x}`, labels: [x], properties: { name: x } });
+    return { nodes: [...labels.values()], edges: info.schema.map((e, i) => ({ id: `S:${i}`, type: `${e.type} (${num(e.count)})`, src: `L:${e.from}`, dst: `L:${e.to}`, properties: {} })) };
+  }
+  async function runQ(text) { queryIn.value = text; return run(); }
+  async function run() {
+    const text = queryIn.value.trim();
+    if (!text) return;
+    const t0 = performance.now();
+    const r = await guard(() => api("POST", collPath(coll, "/cypher"), { query: text, read_only: ro.checked }));
+    if (!r) return;
+    tookMs = Math.round(performance.now() - t0);
+    result = r; g = graphOf(r); selected = null;
+    if (mode === "schema") mode = "graph";
+    if (!g.nodes.length && r.columns.length) mode = "table";
+    const hist = [text, ...loadHistory().filter((x) => x !== text)].slice(0, 20);
+    try { localStorage.setItem(historyKey, JSON.stringify(hist)); } catch { /* private window */ }
+    drawHistory();
+    if (!ro.checked) { info = await api("GET", collPath(coll, "/graph")).catch(() => info); drawSide(); }
+    draw();
+  }
+  async function expand(n) {
+    const r = await guard(() => api("POST", collPath(coll, "/cypher"), { query: "MATCH (n)-[r]-(m) WHERE id(n) = $id RETURN n, r, m LIMIT 100", params: { id: Number(n.id) }, read_only: true }));
+    if (!r) return;
+    const more = graphOf(r);
+    if (!more.edges.length) { toast("No neighbours to add", "info"); return; }
+    const nodes = new Map(g.nodes.map((x) => [String(x.id), x])), edges = new Map(g.edges.map((x) => [String(x.id), x]));
+    for (const x of more.nodes) nodes.set(String(x.id), x);
+    for (const x of more.edges) edges.set(String(x.id), x);
+    g = { nodes: [...nodes.values()], edges: [...edges.values()] };
+    selected = { kind: "node", item: n };
+    draw();
+  }
+  async function open() {
+    info = null; result = null; g = { nodes: [], edges: [] }; selected = null; colors.clear();
+    drawSide(); draw();
+    info = await guard(() => api("GET", collPath(coll, "/graph")));
+    drawSide();
+    if (info && info.nodes) await runQ(info.nodes <= 300 ? "MATCH (n) OPTIONAL MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 300" : "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 150");
+  }
+  queryIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); run(); } });
+  drawHistory();
+  fill(root, h("div", { class: "gb" }, side,
+    h("div", { class: "gb-main" },
+      h("div", { class: "gb-bar" }, queryIn, historySel, admin ? h("label", { class: "row small muted gb-ro", title: "Untick to let the query change the graph" }, ro, "read only") : null,
+        btn("Run", run, { kind: "primary", ico: "play", title: "Run (Enter; Shift+Enter for a new line)" })),
+      h("div", { class: "card gb-card" }, stage, status))));
+  await open();
+}
+
+// a label or relationship type as Cypher writes it: backquoted unless it's a plain name
+const cypherName = (n) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(n) ? n : `\`${String(n).replaceAll("`", "``")}\``);
+
+// Tables (PostgreSQL): #tables, #tables/table/<name>, #tables/schema, #tables/database/<kind>, #tables/sql
+view.tables = async (root, arg, actions) => {
   const [first, ...rest] = (arg || "").split("/");
-  const tab = ["tables", "schema", "database", "sql", "cypher", "vectors"].includes(first) ? first : "tables";
-  fill(actions, dataTabs(tab, (k) => { location.hash = `data/${k}`; }));
+  const tab = { table: "tables", schema: "schema", database: "database", sql: "sql" }[first] || "tables";
+  fill(actions, pageTabs("tables", tab, [["tables", "Tables"], ["schema", "Schema"], ["database", "Database"], ["sql", "SQL"]]));
   fill(root, skeleton("block", 2));
-  if (tab === "tables") return dataTables(root, rest.length ? rest.join("/") : null);
   if (tab === "schema") return dataSchema(root);
   if (tab === "database") return dataDatabase(root, rest[0]);
   if (tab === "sql") return dataSql(root);
-  if (tab === "cypher") return dataCypher(root);
-  return dataVectors(root);
+  if (first !== "table" || !rest.length) return dataTables(root, null);
+  const sub = ["rows", "structure", "api"].includes(rest[rest.length - 1]) && rest.length > 1 ? rest.pop() : "rows";
+  return dataTables(root, rest.join("/"), sub);
 };
+
+// Vectors: #vectors/<collection>/<tab>
+view.vectors = async (root, arg) => {
+  fill(root, skeleton("block", 2));
+  return dataVectors(root, (arg || "").split("/").filter(Boolean));
+};
+
+// addresses from before the Data page was split by engine
+function movedHash(hash) {
+  const [page, sub, ...rest] = hash.split("/");
+  if (page !== "data") return null;
+  if (sub === "vectors") return ["vectors", ...rest].join("/");
+  if (sub === "cypher") return "graph";
+  if (sub === "tables" && rest.length) return ["tables", "table", ...rest].join("/");
+  if (["schema", "database", "sql"].includes(sub)) return ["tables", sub, ...rest].join("/");
+  return "tables";
+}
 
 // a result worth a chart: a label (or date) column and a number column, a handful of rows
 function resultChart(res) {
@@ -1327,134 +1637,439 @@ async function dataCypher(root) {
   run();
 }
 
-async function dataVectors(root) {
+// a JSON value as a tree: objects and arrays fold (open to `open` levels), values coloured by type
+function jsonTree(value, open = 2, depth = 0) {
+  if (value === null) return h("span", { class: "j-null" }, "null");
+  if (Array.isArray(value) || typeof value === "object") {
+    const entries = Array.isArray(value) ? value.map((v, i) => [i, v]) : Object.entries(value);
+    if (!entries.length) return h("span", { class: "j-punct" }, Array.isArray(value) ? "[]" : "{}");
+    const sum = Array.isArray(value) ? `[ ${plural(entries.length, "item")} ]` : `{ ${plural(entries.length, "field")} }`;
+    const d = h("details", { class: "j-node" }, h("summary", {}, h("span", { class: "j-punct" }, sum)),
+      h("div", { class: "j-body" }, entries.map(([k, v]) => h("div", { class: "j-row" },
+        h("span", { class: Array.isArray(value) ? "j-idx" : "j-key" }, Array.isArray(value) ? `${k}` : `${k}`), h("span", { class: "j-punct" }, ": "),
+        jsonTree(v, open, depth + 1)))));
+    if (depth < open) d.open = true;
+    return d;
+  }
+  if (typeof value === "string") return h("span", { class: "j-str" }, JSON.stringify(value));
+  if (typeof value === "number") return h("span", { class: "j-num" }, String(value));
+  return h("span", { class: "j-bool" }, String(value));
+}
+
+const VECTOR_TABS = [["points", "Points"], ["info", "Info"], ["indexes", "Indexes"], ["memory", "Memory"],
+  ["segments", "Segments"], ["quality", "Index quality"], ["map", "Map"], ["api", "Qdrant API"]];
+const vecLabel = (v) => v.name || "default";
+const vecShape = (v) => `${v.size ?? "?"} · ${v.distance ?? ""}${v.kind === "multivector" ? " · multi" : ""}`;
+
+async function dataVectors(root, rest = []) {
+  if (!rest[0]) return vecCollections(root);
+  const coll = rest[0];
+  const tab = VECTOR_TABS.some(([k]) => k === rest[1]) ? rest[1] : "points";
+  const go = (c, t) => { location.hash = `vectors/${encodeURIComponent(c)}/${t}`; };
+  const [meta, inspect] = await Promise.all([api("GET", collPath(coll)), api("GET", collPath(coll, "/inspect")).catch(() => null)]);
+  const ins = inspect || { vectors: [], sparse: [], payload_indexes: [], engine: "?" };
+  const isDocs = !!meta.documents;
+  const tabs = h("div", { class: "vtabs", role: "tablist" }, VECTOR_TABS.map(([k, label]) =>
+    h("button", { type: "button", role: "tab", class: k === tab ? "on" : null, onclick: () => go(coll, k) }, label)));
+  const body = h("div", { class: "stack" });
+  fill(root, h("div", { class: "vpage" },
+    h("a", { href: "#vectors", class: "vback" }, "← Collections"),
+    h("h2", { class: "vtitle" }, coll, isDocs ? h("span", { class: "vchip" }, "documents") : null),
+    tabs, body));
+  const ctx = { coll, ins, meta, isDocs, go };
+  const views = { points: vecPoints, info: vecInfo, indexes: vecIndexes, memory: vecMemory, segments: vecSegments,
+                  quality: vecQuality, map: vecMap, api: vecApi };
+  fill(body, skeleton("block", 2));
+  try { await views[tab](body, ctx); } catch (e) { fill(body, card(h("div", { class: "card-pad muted" }, e instanceof ApiError ? e.message : String(e)))); }
+}
+
+// every vector collection, as Qdrant's dashboard lists them
+async function vecCollections(root) {
   const { collections } = await api("GET", "/v1/collections");
   const vecs = collections.filter((c) => c.vector);
-  if (!vecs.length) { fill(root, card(empty("vector", "No vector collections yet", "Create a collection with documents or raw vectors."))); return; }
-  let coll = vecs[0].name, next = null, points = [], info = null, where = {}, fields = {}, loading = 0;
-  const listCard = h("div", { class: "card flush" });
-  const detail = h("div", { class: "stack" });
-  const filterBar = h("div", { class: "row" });
-  const sel = h("select", { "aria-label": "Collection", onchange: (e) => { coll = e.target.value; where = {}; load(true); } },
-    vecs.map((c) => h("option", { value: c.name }, c.name)));
-
-  // payload fields to filter on, and their common values, from a sample of the collection (document metadata is
-  // under "meta.")
-  async function sampleFields() {
-    const r = await api("POST", collPath(coll, "/points/scroll"), { limit: 500 }).catch(() => null);
-    const out = {}, decimal = new Set();
-    const add = (k, v) => {
-      if (k.startsWith("_") || !["string", "number", "boolean"].includes(typeof v)) return;
-      if (typeof v === "number" && !Number.isInteger(v)) { decimal.add(k); return; }  // exact matches only: no measures
-      if (typeof v === "string" && v.length > 80) return;  // text, not a category
-      const f = (out[k] ||= new Map());
-      const key = JSON.stringify(v);
-      f.set(key, (f.get(key) || 0) + 1);
-    };
-    for (const p of (r ? r.points : [])) {
-      for (const [k, v] of Object.entries(p.payload || {})) {
-        if (k === "meta" && v && typeof v === "object" && !Array.isArray(v)) for (const [mk, mv] of Object.entries(v)) add(`meta.${mk}`, mv);
-        else if (Array.isArray(v)) v.forEach((x) => add(k, x));
-        else add(k, v);
-      }
-    }
-    fields = Object.fromEntries(Object.entries(out)
-      .filter(([k, m]) => !decimal.has(k) && (m.size > 1 || [...m.values()][0] > 1))
-      .map(([k, m]) => [k, [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([v, n]) => ({ value: JSON.parse(v), count: n }))]));
-    drawFilters();
+  const search = h("input", { placeholder: "Search collection", class: "grow", "aria-label": "Search collection" });
+  const box = h("div");
+  if (!vecs.length) {
+    fill(root, card(empty("vector", "No vector collections yet", "Create one with documents or raw vectors, or with the Qdrant client (see Connect).")));
+    return;
   }
-  function drawFilters() {
-    const names = Object.keys(fields).sort();
-    const field = h("select", { "aria-label": "Payload field" }, h("option", { value: "" }, names.length ? "Filter by field…" : "No fields to filter on"),
-      names.map((k) => h("option", { value: k }, k)));
-    const listId = `vals-${Math.random().toString(36).slice(2)}`;
-    const values = h("datalist", { id: listId });
-    const value = h("input", { placeholder: "value", list: listId, "aria-label": "Payload value", disabled: true });
-    field.addEventListener("change", () => {
-      fill(values, (fields[field.value] || []).map((v) => h("option", { value: String(v.value) }, `${num(v.count)} in the sample`)));
-      value.disabled = !field.value; value.value = ""; value.focus();
-    });
-    const apply = () => {
-      if (!field.value || value.value === "") return;
-      // keep the value's type: what the sample holds for this field, else a number or true/false when it reads as one
-      const known = (fields[field.value] || []).find((v) => String(v.value) === value.value);
-      let v = known ? known.value : value.value;
-      if (!known && /^-?\d+(\.\d+)?$/.test(v)) v = Number(v);
-      if (!known && (v === "true" || v === "false")) v = v === "true";
-      where[field.value] = v;
-      load(true);
-    };
-    value.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); });
-    fill(filterBar, field, value, btn("Add filter", apply, { ico: "plus" }),
-      Object.entries(where).map(([k, v]) => h("button", { class: "chip", type: "button", title: "Remove this filter",
-        onclick: () => { delete where[k]; load(true); } }, `${k} = ${metaText(v)}  ×`)));
-  }
-  const isDocs = () => info && info.documents;
-  const preview = (p) => {
-    const pl = p.payload || {};
-    if (isDocs()) return `${pl.doc ?? ""} #${pl.chunk ?? ""}  ${clip(String(pl.text ?? ""), 90)}`;
-    return clip(JSON.stringify(pl), 110);
+  const rows = await Promise.all(vecs.map((c) => api("GET", collPath(c.name, "/inspect")).then((i) => ({ name: c.name, ...i })).catch(() => ({ name: c.name, vectors: [], sparse: [] }))));
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    fill(box, table([
+      { label: "Name", get: (r) => h("a", { href: `#vectors/${encodeURIComponent(r.name)}`, class: "vlink" }, r.name) },
+      { label: "Status", get: (r) => (r.status ? pill(String(r.status).toUpperCase(), r.status === "green" ? "ok" : r.status === "yellow" ? "warn" : "bad") : "-") },
+      { label: "Points", num: true, get: (r) => num(r.points) },
+      { label: "Segments", num: true, get: (r) => (r.segments != null ? num(r.segments) : "-") },
+      { label: "Vectors config", get: (r) => h("div", { class: "vconf" },
+        r.vectors.map((v) => h("div", {}, h("span", { class: "vtag" }, vecLabel(v)), h("span", { class: "vtag" }, String(v.size ?? "?")), h("span", { class: "vtag" }, v.distance || "?"),
+          v.kind === "multivector" ? h("span", { class: "vtag" }, "multi") : null)),
+        r.sparse.map((s) => h("div", {}, h("span", { class: "vtag" }, s.name), h("span", { class: "vtag" }, "Sparse")))) }],
+      rows.filter((r) => !q || r.name.toLowerCase().includes(q)), { onRow: (r) => { location.hash = `vectors/${encodeURIComponent(r.name)}`; } }));
   };
-  async function load(reset) {
-    const filtered = Object.keys(where).length > 0;
-    const mine = ++loading;  // a newer load (another filter, collection or page) replaces this one's result
-    if (reset) {
-      next = null; points = [];
-      const fresh = !info || info.name !== coll;
-      info = await guard(() => api("GET", collPath(coll)));
-      fill(detail);
-      if (fresh) sampleFields(); else drawFilters();
+  search.addEventListener("input", draw);
+  fill(root, h("div", { class: "vpage" }, h("h2", { class: "vtitle" }, "Collections"),
+    h("div", { class: "vsearch" }, icon("search"), search), card(box)));
+  draw();
+}
+
+
+// payload fields to filter on and colour by, from a sample (document metadata is under "meta.")
+async function sampleFields(coll) {
+  const r = await api("POST", collPath(coll, "/points/scroll"), { limit: 500 }).catch(() => null);
+  const out = {}, decimal = new Set();
+  const add = (k, v) => {
+    if (k.startsWith("_") || !["string", "number", "boolean"].includes(typeof v)) return;
+    if (typeof v === "number" && !Number.isInteger(v)) { decimal.add(k); return; }
+    if (typeof v === "string" && v.length > 80) return;
+    const f = (out[k] ||= new Map());
+    const key = JSON.stringify(v);
+    f.set(key, (f.get(key) || 0) + 1);
+  };
+  const walk = (obj, prefix) => {
+    for (const [k, v] of Object.entries(obj || {})) {
+      const name = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === "object" && !Array.isArray(v)) { if (!prefix) walk(v, name); }
+      else if (Array.isArray(v)) v.forEach((x) => add(name, x));
+      else add(name, v);
     }
-    const r = await guard(() => api("POST", collPath(coll, "/points/scroll"),
-      { limit: 50, offset: next, where: filtered ? where : null }));
-    if (!r || mine !== loading) return;
-    points = points.concat(r.points); next = r.next;
-    const v = info && info.vector;
-    const shape = v ? `${v.size} dimensions · ${v.distance}${v.sparse ? " · with BM25 keywords" : ""}` : "";
-    fill(listCard, cardHead("Points", v ? (filtered
-      ? `${num(points.length)}${next !== null ? "+" : ""} matching the filters, of ${num(v.points)} · ${shape}`
-      : `${num(v.points)} points · ${shape}`) : ""),
-      table([{ label: "Id", mono: true, get: (p) => clip(String(p.id), 38) },
-             { label: isDocs() ? "Document · chunk · text" : "Payload", get: (p) => h("span", { class: "small" }, preview(p)) },
-             ...(isDocs() ? [{ label: "Live", get: (p) => (p.payload.live ? pill("live", "ok") : pill("hidden", "warn")) }] : [])],
-            points, { onRow: show }),
-      next !== null ? h("div", { class: "card-pad" }, btn("Load more", () => load(false), { ico: "download" })) : null);
-    if (!detail.childNodes.length) fill(detail, card(empty("vector", "Pick a point", "See its payload and vector, and find its nearest neighbours.")));
+  };
+  for (const p of (r ? r.points : [])) walk(p.payload, "");
+  return Object.fromEntries(Object.entries(out)
+    .filter(([k, m]) => !decimal.has(k) && (m.size > 1 || [...m.values()][0] > 1))
+    .map(([k, m]) => [k, [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([v, n]) => ({ value: JSON.parse(v), count: n }))]));
+}
+
+// ---------------------------------------------------------------- Points: the points as cards, like Qdrant's dashboard
+
+// "category:kitchen price:12" -> {category: "kitchen", price: 12}; "id:123" -> an id
+function parsePointFilter(text) {
+  const where = {};
+  let id = null;
+  for (const part of text.trim().split(/\s+(?=[\w.-]+:)/).filter(Boolean)) {
+    const at = part.indexOf(":");
+    if (at < 1) throw new Error(`"${part}" isn't key:value`);
+    const key = part.slice(0, at).trim();
+    let raw = part.slice(at + 1).trim().replace(/^"(.*)"$/, "$1");
+    let v = raw;
+    if (/^-?\d+(\.\d+)?$/.test(raw)) v = Number(raw);
+    else if (raw === "true" || raw === "false") v = raw === "true";
+    if (key === "id") id = v; else where[key] = v;
   }
-  async function show(p) {
-    const r = await guard(() => api("POST", collPath(coll, "/points/get"), { ids: [p.id] }));
-    const full = r && r.points[0] ? r.points[0] : p;
-    const vec = Array.isArray(full.vector) ? full.vector : full.vector && full.vector.dense;
-    const near = h("div", { class: "stack" });
-    async function similar() {
-      let hits;
-      if (isDocs()) {
-        const res = await guard(() => api("POST", collPath(coll, "/query"), { query: String(full.payload.text || ""), k: 8, mode: "dense", graph_hops: 0 }));
-        hits = res && res.hits.map((x) => ({ id: x.chunk_id, score: x.score, label: `${x.document} #${x.chunk}  ${clip(String(x.text || ""), 80)}` }));
-      } else {
-        const res = vec && await guard(() => api("POST", collPath(coll, "/search"),
-          { vector: vec, limit: 8, where: Object.keys(where).length ? where : null }));
-        hits = res && res.hits.map((x) => ({ id: x.id, score: x.score, label: clip(JSON.stringify(x.payload || {}), 80) }));
-      }
-      if (!hits) return;
-      fill(near, card(cardHead("Nearest neighbours", isDocs() ? "by the chunk's text, dense vectors only"
-        : Object.keys(where).length ? "by this point's vector, within the filters" : "by this point's vector"),
-        table([{ label: "Id", mono: true, get: (x) => clip(String(x.id), 30) }, { label: "Score", num: true, get: (x) => fmt(x.score) },
-               { label: "", get: (x) => h("span", { class: "small wrap-any" }, x.label) }], hits)));
+  return { where, id };
+}
+
+async function vecPoints(root, { coll, ins, isDocs }) {
+  const named = [...ins.vectors, ...ins.sparse];
+  let next = null, points = [], where = {}, similar = null, loading = 0;
+  const simIn = h("input", { placeholder: "Similar to (id)", class: "mono", "aria-label": "Similar to point id" });
+  const usingSel = named.length > 1 ? h("select", { "aria-label": "Vector" }, named.map((v) => h("option", { value: v.name }, vecLabel(v)))) : null;
+  const filterIn = h("input", { placeholder: "Filter by payload (key:value) or point ID (id:123)", class: "grow", "aria-label": "Filter" });
+  const list = h("div", { class: "pcards" });
+  const more = h("div");
+  const note = h("div", { class: "small muted" });
+
+  const run = () => {
+    try {
+      const f = parsePointFilter(filterIn.value);
+      where = f.where;
+      const raw = simIn.value.trim();
+      similar = raw ? { like: /^\d+$/.test(raw) ? Number(raw) : raw, using: usingSel ? usingSel.value : (named[0] ? named[0].name : "") } : null;
+      if (f.id !== null) return loadIds([f.id]);
+      load(true);
+    } catch (e) { fill(note, e.message); }
+  };
+  for (const el of [simIn, filterIn]) el.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+  if (usingSel) usingSel.addEventListener("change", () => { if (simIn.value.trim()) run(); });
+  const clear = (el) => btn("", () => { el.value = ""; run(); }, { ico: "x", title: "Clear" });
+
+  function cardFor(p) {
+    const vecs = p.vector && !Array.isArray(p.vector) && typeof p.vector === "object" && !Array.isArray(p.vector.indices)
+      ? Object.entries(p.vector) : p.vector ? [["", p.vector]] : [];
+    const len = (v) => (Array.isArray(v) ? (Array.isArray(v[0]) ? `${v.length} × ${v[0].length}` : v.length) : v && Array.isArray(v.indices) ? v.indices.length : "-");
+    return h("div", { class: "card pcard" },
+      h("div", { class: "pcard-head" }, h("b", {}, `Point ${p.id}`), p.score != null ? h("span", { class: "vtag" }, `score ${fmt(p.score, 4)}`) : null,
+        h("span", { class: "grow" }), copyButton(JSON.stringify({ id: p.id, payload: p.payload }, null, 2))),
+      h("div", { class: "pcard-body" },
+        h("div", { class: "pcard-label" }, "Payload"), h("div", { class: "jtree" }, jsonTree(p.payload || {}, 3)),
+        vecs.length ? h("div", { class: "pcard-label" }, "Vectors") : null,
+        vecs.length ? h("div", { class: "pvecs" }, vecs.map(([name, v]) => h("div", { class: "pvec" },
+          h("span", { class: "muted" }, "Name:"), h("b", { class: "mono" }, name || "default"),
+          h("span", { class: "muted" }, "Length:"), h("b", { class: "mono" }, String(len(v))),
+          h("span", { class: "grow" }), copyButton(JSON.stringify(v)),
+          btn("Find similar", () => { simIn.value = String(p.id); if (usingSel) usingSel.value = name; run(); window.scrollTo({ top: 0, behavior: "smooth" }); }, { ico: "search" })))) : null));
+  }
+  function draw() {
+    fill(list, points.length ? points.map(cardFor) : card(empty("vector", similar ? "No similar points" : "No points match", Object.keys(where).length ? "Change or clear the filter." : null)));
+    fill(more, next !== null && !similar ? h("div", { class: "row center" }, btn("Load more", () => load(false), { ico: "download" })) : null);
+    fill(note, similar ? `Most similar to point ${similar.like}${similar.using ? ` by "${similar.using}"` : ""}${Object.keys(where).length ? ", within the filter" : ""}`
+      : Object.keys(where).length ? `${num(points.length)}${next !== null ? "+" : ""} points match the filter` : `${num(ins.points)} points`);
+  }
+  // points/get and scroll leave vectors out of the list; fetch them with the page so each card shows its vectors
+  async function withVectors(pts) {
+    if (!pts.length) return pts;
+    const r = await api("POST", collPath(coll, "/points/get"), { ids: pts.map((p) => p.id) }).catch(() => null);
+    const byId = new Map((r ? r.points : []).map((x) => [String(x.id), x]));
+    return pts.map((p) => ({ ...p, vector: (byId.get(String(p.id)) || {}).vector }));
+  }
+  async function load(reset) {
+    const mine = ++loading;
+    if (reset) { next = null; points = []; }
+    if (similar) {
+      const r = await guard(() => api("POST", collPath(coll, "/similar"), { like: similar.like, using: similar.using, limit: 20, where: Object.keys(where).length ? where : null }));
+      if (!r || mine !== loading) return;
+      points = await withVectors(r.hits); next = null;
+    } else {
+      const r = await guard(() => api("POST", collPath(coll, "/points/scroll"), { limit: 10, offset: next, where: Object.keys(where).length ? where : null }));
+      if (!r || mine !== loading) return;
+      points = points.concat(await withVectors(r.points)); next = r.next;
     }
-    fill(detail,
-      card(cardHead(clip(String(p.id), 40), isDocs() ? "a chunk of a document" : "a point", btn("Find similar", similar, { kind: "primary", ico: "search" })),
-        h("div", { class: "card-pad stack" },
-          h("div", { class: "field-label" }, "Payload"), h("pre", { class: "codeblock wrap" }, JSON.stringify(full.payload, null, 2)),
-          vec ? h("div", { class: "field-label" }, `Vector (${vec.length} dimensions)`) : null,
-          vec ? h("pre", { class: "codeblock wrap" }, `[${vec.slice(0, 12).map((x) => Number(x).toFixed(4)).join(", ")}${vec.length > 12 ? ", …" : ""}]`) : null)),
-      near);
+    if (mine === loading) draw();
+  }
+  async function loadIds(ids) {
+    const r = await guard(() => api("POST", collPath(coll, "/points/get"), { ids }));
+    if (!r) return;
+    similar = null; points = r.points; next = null; draw();
   }
   fill(root, h("div", { class: "stack" },
-    card(cardHead("Vectors", "Every point of a collection, as the vector store holds it. Read only.", sel),
-      h("div", { class: "card-pad" }, filterBar)),
-    h("div", { class: "split" }, listCard, detail)));
+    h("div", { class: "pbar" },
+      h("div", { class: "vsearch psim" }, icon("vector"), simIn, usingSel, clear(simIn)),
+      h("div", { class: "vsearch grow" }, icon("search"), filterIn, clear(filterIn))),
+    note, list, more));
+  if (isDocs) fill(note, "A documents collection: its points are passages. Reading them directly skips document readers, so it needs the admin key.");
   await load(true);
+}
+
+// ---------------------------------------------------------------- Info: how the collection is set up
+
+async function vecInfo(root, { ins }) {
+  const kv = (pairs) => h("dl", { class: "kv" }, pairs.filter(([, v]) => v !== undefined && v !== null).flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
+  const yes = (b) => (b ? "yes" : "no");
+  fill(root,
+    h("div", { class: "grid c2" },
+      card(cardHead("Collection", "State and size"), h("div", { class: "card-pad" }, kv([
+        ["Engine", ins.engine === "pgvector" ? "pgvector (lite profile)" : "Qdrant"], ["Status", ins.status], ["Optimizer", ins.optimizer_status],
+        ["Points", num(ins.points)], ["Indexed vectors", ins.indexed_vectors != null ? num(ins.indexed_vectors) : null],
+        ["Segments", ins.segments != null ? num(ins.segments) : null], ["Shards", ins.shards], ["Replicas", ins.replication],
+        ["Payload on disk", ins.on_disk_payload != null ? yes(ins.on_disk_payload) : null]]))),
+      card(cardHead("Search index (HNSW)", "How the approximate index is built"), h("div", { class: "card-pad" }, ins.hnsw ? kv([
+        ["Links per node (m)", ins.hnsw.m], ["Build quality (ef_construct)", ins.hnsw.ef_construct],
+        ["Exact below", `${num(ins.hnsw.full_scan_threshold)} KB per segment`], ["On disk", yes(ins.hnsw.on_disk)],
+        ["Quantization", ins.quantization ? Object.keys(ins.quantization).join(", ") : "none"]]) : h("div", { class: "muted small" }, "Postgres builds pgvector's index; see Tables > Database > Indexes.")))),
+    card(cardHead("Vectors", "Each point carries one of each"),
+      table([{ label: "Name", mono: true, get: (v) => vecLabel(v) }, { label: "Kind", get: (v) => v.kind || "sparse" },
+             { label: "Size", num: true, get: (v) => (v.size != null ? num(v.size) : "-") }, { label: "Distance", get: (v) => v.distance || (v.modifier ? `modifier: ${v.modifier}` : "-") },
+             { label: "On disk", get: (v) => (v.on_disk ? "yes" : "no") }], [...ins.vectors, ...ins.sparse])),
+    ins.optimizer ? card(cardHead("Optimizer", "When segments are merged, indexed and cleaned"), h("div", { class: "card-pad" }, kv([
+      ["Index when a segment has", `${num(ins.optimizer.indexing_threshold)} KB of vectors`], ["Vacuum at", `${Math.round((ins.optimizer.deleted_threshold || 0) * 100)}% deleted`],
+      ["Default segments", ins.optimizer.default_segment_number || "automatic"], ["Flush every", `${ins.optimizer.flush_interval_sec}s`]]))) : null,
+    card(cardHead("Raw configuration", "As the engine reports it"), h("div", { class: "card-pad jtree" }, jsonTree(ins, 1))));
+}
+
+// ---------------------------------------------------------------- Indexes: payload indexes
+
+async function vecIndexes(root, ctx) {
+  const { coll, ins, isDocs } = ctx;
+  const lite = ins.engine === "pgvector";
+  const fields = await sampleFields(coll);
+  const listId = `fields-${Math.random().toString(36).slice(2)}`;
+  const field = h("input", { placeholder: "payload field, e.g. category or specs.color", list: listId, class: "mono grow", "aria-label": "Field" });
+  const kind = h("select", { "aria-label": "Index type" }, ["keyword", "integer", "float", "bool", "datetime", "text", "geo", "uuid"].map((k) => h("option", { value: k }, k)));
+  const create = async () => {
+    if (!field.value.trim()) return;
+    if (await guard(() => api("PUT", collPath(coll, "/index"), { field: field.value.trim(), type: kind.value }))) { toast(`Indexed ${field.value.trim()}`); ctx.go(coll, "indexes"); route(); }
+  };
+  fill(root,
+    card(cardHead("Payload indexes", lite ? "Qdrant's: the lite profile filters in Postgres" : "Fields indexed for fast filtering. A filter on a field without one scans the points."),
+      table([{ label: "Field", mono: true, get: (x) => x.field }, { label: "Type", get: (x) => pill(x.type || "?", "") },
+             { label: "Points", num: true, get: (x) => num(x.points) },
+             { label: "", num: true, get: (x) => (isDocs || lite ? null : btn("", async () => {
+               if (await guard(() => api("DELETE", collPath(coll, `/index/${encodeURIComponent(x.field)}`)))) { toast(`Dropped the index on ${x.field}`); route(); }
+             }, { ico: "trash", title: `Drop the index on ${x.field}` })) }],
+            ins.payload_indexes, { emptyView: empty("info", "No payload indexes", lite ? null : "Filters still work; on a large collection, index the fields you filter on.") })),
+    isDocs || lite ? card(h("div", { class: "card-pad small muted" }, isDocs ? "swsdb manages a documents collection's indexes." : "Not available in the lite profile."))
+      : card(cardHead("Add an index", "Needs the admin key"), h("div", { class: "card-pad row" }, field,
+        h("datalist", { id: listId }, Object.keys(fields).map((k) => h("option", { value: k }))), kind, btn("Create index", create, { kind: "primary", ico: "plus" }))));
+}
+
+// ---------------------------------------------------------------- Memory: where the bytes are
+
+async function vecMemory(root, { coll }) {
+  const m = await api("GET", collPath(coll, "/memory"));
+  let metric = "disk_bytes";
+  const view = h("div", { class: "stack" });
+  const sumU = (u) => (u ? u[metric] || 0 : 0);
+  const rows = () => {
+    const out = [];
+    const group = (label, items) => { if (items.length) out.push({ label, bytes: items.reduce((a, b) => a + b.bytes, 0), group: true }, ...items); };
+    group("Vectors", (m.vectors || []).map((v) => ({ label: v.name || "default", bytes: sumU(v.storage) + sumU(v.index), sub: `storage ${bytesText(sumU(v.storage))} · index ${bytesText(sumU(v.index))}` })));
+    group("Sparse vectors", (m.sparse_vectors || []).map((v) => ({ label: v.name, bytes: sumU(v.storage) + sumU(v.index), sub: `storage ${bytesText(sumU(v.storage))} · index ${bytesText(sumU(v.index))}` })));
+    group("Payload", [{ label: "payload", bytes: sumU(m.payload) }].filter((x) => x.bytes));
+    group("Payload indexes", (m.payload_index || []).map((x) => ({ label: x.name, bytes: sumU(x.usage) })).sort((a, b) => b.bytes - a.bytes));
+    return out;
+  };
+  const draw = () => {
+    const rs = rows();
+    const max = Math.max(1, ...rs.filter((r) => r.group).map((r) => r.bytes));
+    const toggle = h("div", { class: "tabs" }, [["disk_bytes", "Disk"], ["ram_bytes", "RAM"], ["cached_bytes", "Cached"]].map(([k, l]) =>
+      h("button", { type: "button", class: k === metric ? "on" : null, onclick: () => { metric = k; draw(); } }, l)));
+    fill(view,
+      h("div", { class: "grid c4" }, [["Disk", "disk_bytes", "the files, including space reserved ahead"], ["RAM", "ram_bytes", "held in memory, never evicted"],
+        ["Cached", "cached_bytes", "in the OS page cache now"], ["Expected cache", "expected_cache_bytes", "what fast search wants cached"]].map(([l, k, foot]) =>
+        card(h("div", { class: "stat" }, h("div", { class: "label" }, l), h("div", { class: "value" }, bytesText(m.total?.[k] ?? 0)), h("div", { class: "foot" }, foot))))),
+      card(cardHead("Where it goes", m.engine === "pgvector" ? "Postgres table and index sizes (lite profile)" : "Approximate: allocator overhead can add up to a fifth", toggle),
+        h("div", { class: "card-pad mem" }, rs.map((r) => {
+          const bar = h("i");
+          bar.style.width = `${Math.max(r.bytes ? 0.6 : 0, (r.bytes / max) * 100)}%`;
+          return h("div", { class: `mem-row${r.group ? " group" : ""}` }, h("div", { class: "mono" }, r.label, r.sub ? h("div", { class: "tiny muted" }, r.sub) : null),
+            h("div", { class: "mem-bar" }, bar), h("div", { class: "num mono" }, bytesText(r.bytes)));
+        }))));
+  };
+  fill(root, view);
+  draw();
+}
+
+// ---------------------------------------------------------------- Segments: the pieces Qdrant keeps, and what's being optimized
+
+async function vecSegments(root, { coll }) {
+  const s = await api("GET", collPath(coll, "/segments"));
+  const segs = s.idle_segments || [];
+  const max = Math.max(1, ...segs.map((x) => x.points_count || 0));
+  const sum = s.summary || {};
+  fill(root,
+    h("div", { class: "grid c4" }, [["Segments at rest", sum.idle_segments ?? segs.length], ["Running", (s.running || []).length],
+      ["Queued optimizations", sum.queued_optimizations ?? 0], ["Points waiting", sum.queued_points ?? 0]].map(([l, v]) =>
+      card(h("div", { class: "stat" }, h("div", { class: "label" }, l), h("div", { class: "value" }, num(v)))))),
+    card(cardHead("Segments", "Qdrant splits a collection into segments, merges small ones and builds each one's index in the background"),
+      table([{ label: "Segment", mono: true, get: (x) => x.uuid.slice(0, 8) }, { label: "Points", num: true, get: (x) => num(x.points_count) },
+             { label: "", get: (x) => { const bar = h("i"); bar.style.width = `${((x.points_count || 0) / max) * 100}%`; return h("div", { class: "mem-bar seg-bar" }, bar); } }], segs, { emptyView: empty("check", "No segments at rest") })),
+    (s.running || []).length || (s.queued || []).length || (s.completed || []).length
+      ? card(cardHead("Optimizations", "Running, queued and recently finished"), h("div", { class: "card-pad jtree" }, jsonTree({ running: s.running, queued: s.queued, completed: s.completed }, 1)))
+      : card(h("div", { class: "card-pad muted small" }, "Nothing to optimize: every segment is merged and indexed.")));
+}
+
+// ---------------------------------------------------------------- Index quality: recall of the approximate search
+
+async function vecQuality(root, { coll, ins }) {
+  const dense = ins.vectors;
+  if (ins.engine === "pgvector") { fill(root, card(empty("info", "Measured on Qdrant", "The lite profile's pgvector index isn't measured here yet."))); return; }
+  if (!dense.length) { fill(root, card(empty("info", "No dense vectors", "Index quality is measured on dense vectors."))); return; }
+  const samples = h("select", { "aria-label": "Samples" }, [20, 50, 100, 200].map((n) => h("option", { value: n, selected: n === 50 ? "selected" : null }, `${n} random points`)));
+  const k = h("select", { "aria-label": "Top k" }, [5, 10, 20, 50].map((n) => h("option", { value: n, selected: n === 10 ? "selected" : null }, `top ${n}`)));
+  const results = {};
+  const report = h("div", { class: "stack" });
+  const tableBox = h("div");
+  const draw = () => fill(tableBox, table([
+    { label: "Vector", mono: true, get: (v) => vecLabel(v) }, { label: "Size", num: true, get: (v) => num(v.size) }, { label: "Distance", get: (v) => v.distance },
+    { label: "Recall", get: (v) => (results[v.name] ? meter(results[v.name].recall ?? 0, 1, results[v.name].recall >= 0.95 ? "ok" : results[v.name].recall >= 0.8 ? "warn" : "bad") : h("span", { class: "muted" }, "-")) },
+    { label: "", num: true, get: (v) => btn("Check", () => check(v), { ico: "play" }) }], dense));
+  async function check(v) {
+    toast(`Comparing ${samples.value} searches with an exact scan…`, "info");
+    const r = await guard(() => api("POST", collPath(coll, "/recall"), { samples: Number(samples.value), k: Number(k.value), using: v.name }));
+    if (!r) return;
+    results[v.name] = r;
+    draw();
+    fill(report, card(cardHead(`Report: ${vecLabel(v)}`, `recall@${r.k} on ${r.samples} random points`),
+      h("div", { class: "card-pad stack" },
+        h("div", { class: "metric-row" },
+          h("div", { class: "metric" }, h("b", {}, r.recall == null ? "-" : `${(r.recall * 100).toFixed(1)}%`), h("span", {}, "mean recall")),
+          h("div", { class: "metric" }, h("b", {}, r.min == null ? "-" : `${(r.min * 100).toFixed(0)}%`), h("span", {}, "worst point")),
+          h("div", { class: "metric" }, h("b", {}, `${r.approx_ms} / ${r.exact_ms} ms`), h("span", {}, "index / exact, per search"))),
+        r.note ? h("div", { class: "small muted" }, r.note) : null,
+        r.worst && r.worst.length ? table([{ label: "Point", mono: true, get: (x) => String(x.id) }, { label: "Recall", num: true, get: (x) => `${(x.recall * 100).toFixed(0)}%` }], r.worst)
+          : h("div", { class: "small" }, "Every sampled search found the same neighbours as an exact scan."))));
+  }
+  draw();
+  fill(root, card(cardHead("Index quality", "How often the approximate (HNSW) search finds the true nearest neighbours: each sample is searched twice, through the index and by an exact scan", samples, k), tableBox), report);
+}
+
+// ---------------------------------------------------------------- Map: the points in 2D
+
+const MAP_COLORS = 8;
+async function vecMap(root, { coll, ins, go }) {
+  const dense = ins.vectors;
+  if (!dense.length) { fill(root, card(empty("info", "No dense vectors to draw"))); return; }
+  const fields = await sampleFields(coll);
+  const using = h("select", { "aria-label": "Vector" }, dense.map((v) => h("option", { value: v.name }, vecLabel(v))));
+  const color = h("select", { "aria-label": "Colour by" }, h("option", { value: "" }, "No colour"), Object.keys(fields).sort().map((f) => h("option", { value: f }, f)));
+  const firstCat = Object.entries(fields).find(([, vals]) => vals.length >= 2 && vals.length <= 12);
+  if (firstCat) color.value = firstCat[0];
+  const limit = h("select", { "aria-label": "Points" }, [300, 1000, 2000, 3000].map((n) => h("option", { value: n, selected: n === 1000 ? "selected" : null }, `${num(n)} points`)));
+  const stage = h("div", { class: "stack" });
+  async function draw() {
+    fill(stage, skeleton("block", 1));
+    const r = await guard(() => api("POST", collPath(coll, "/map"), { limit: Number(limit.value), using: using.value, color_by: color.value || null }));
+    if (!r) { fill(stage); return; }
+    if (!r.points.length) { fill(stage, card(empty("info", r.note || "Nothing to draw"))); return; }
+    const counts = new Map();
+    for (const p of r.points) { const k = p.label == null ? "(none)" : String(p.label); counts.set(k, (counts.get(k) || 0) + 1); }
+    const order = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const cats = new Map(order.slice(0, MAP_COLORS).map(([k], i) => [k, i]));
+    const W = 1000, H = 560, pad = 18;
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, class: "vmap", role: "img", "aria-label": `${r.points.length} points projected to two dimensions` });
+    svg.append(s("line", { x1: W / 2, y1: pad, x2: W / 2, y2: H - pad, class: "vmap-axis" }), s("line", { x1: pad, y1: H / 2, x2: W - pad, y2: H / 2, class: "vmap-axis" }));
+    for (const p of r.points) {
+      const k = p.label == null ? "(none)" : String(p.label);
+      const c = s("circle", { cx: (W / 2 + p.x * (W / 2 - pad)).toFixed(1), cy: (H / 2 - p.y * (H / 2 - pad)).toFixed(1), r: r.points.length > 1500 ? 3 : 4,
+        class: `vdot ${color.value ? (cats.has(k) ? `vc${cats.get(k)}` : "vcother") : "vc0"}` });
+      const t = s("title");
+      t.textContent = `${p.id}${color.value ? ` · ${color.value}: ${k}` : ""}\n${clip(JSON.stringify(p.payload || {}), 160)}`;
+      c.append(t);
+      c.addEventListener("click", () => go(coll, "points"));
+      svg.append(c);
+    }
+    const legend = color.value ? h("div", { class: "vlegend" }, order.slice(0, MAP_COLORS).map(([k, n]) => h("span", {}, h("i", { class: `vc${cats.get(k)}` }), `${k} `, h("b", {}, num(n)))),
+      order.length > MAP_COLORS ? h("span", {}, h("i", { class: "vcother" }), `${order.length - MAP_COLORS} more values `, h("b", {}, num(order.slice(MAP_COLORS).reduce((a, [, n]) => a + n, 0)))) : null) : null;
+    fill(stage, card(cardHead(`${num(r.points.length)} points`, `PCA of "${vecLabel(dense.find((v) => v.name === r.using) || {})}": the two axes keep ${((r.explained[0] + r.explained[1]) * 100).toFixed(1)}% of how the vectors vary. Hover a dot for its payload.`),
+      h("div", { class: "card-pad stack" }, legend, svg)));
+  }
+  fill(root, card(cardHead("Map", "Each dot is a point: nearby dots have similar vectors (roughly; a 2D picture loses detail)", dense.length > 1 ? using : null, color, limit, btn("Draw", draw, { kind: "primary", ico: "play" }))), stage);
+  draw();
+}
+
+// ---------------------------------------------------------------- Qdrant API: requests through the project's /qdrant gate
+
+const QDRANT_PRESETS = (c) => [
+  ["Collection info", "GET", `collections/${c}`, ""],
+  ["List collections", "GET", "collections", ""],
+  ["First 10 points", "POST", `collections/${c}/points/scroll`, JSON.stringify({ limit: 10, with_payload: true }, null, 2)],
+  ["Count points", "POST", `collections/${c}/points/count`, JSON.stringify({ exact: true }, null, 2)],
+  ["Search by a point's vector", "POST", `collections/${c}/points/query`, JSON.stringify({ query: 1, limit: 5 }, null, 2)],
+  ["Facet a field", "POST", `collections/${c}/facet`, JSON.stringify({ key: "category", limit: 10 }, null, 2)],
+  ["Random sample", "POST", `collections/${c}/points/query`, JSON.stringify({ query: { sample: "random" }, limit: 5 }, null, 2)]];
+
+async function vecApi(root, { coll, ins }) {
+  if (ins.engine === "pgvector") { fill(root, card(empty("info", "No Qdrant in the lite profile", "Vectors live in Postgres: use Tables > SQL, or /v1/collections/{name}/search."))); return; }
+  const method = h("select", { "aria-label": "Method" }, ["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => h("option", { value: m }, m)));
+  const path = h("input", { class: "mono grow", value: `collections/${coll}`, "aria-label": "Path", spellcheck: "false" });
+  const bodyIn = h("textarea", { class: "mono", rows: 10, "aria-label": "Body (JSON)", spellcheck: "false", placeholder: "{ }" });
+  const out = h("div", { class: "stack" });
+  const preset = h("select", { "aria-label": "Examples", onchange: (e) => {
+    const p = QDRANT_PRESETS(coll)[Number(e.target.value)];
+    if (!p) return;
+    method.value = p[1]; path.value = p[2]; bodyIn.value = p[3]; e.target.value = "";
+  } }, h("option", { value: "" }, "Examples…"), QDRANT_PRESETS(coll).map((p, i) => h("option", { value: i }, p[0])));
+  async function run() {
+    let payload;
+    if (bodyIn.value.trim() && method.value !== "GET") {
+      try { payload = JSON.stringify(JSON.parse(bodyIn.value)); } catch (e) { fill(out, h("pre", { class: "codeblock wrap drawer-error" }, `Body: ${e.message}`)); return; }
+    }
+    const headers = { "swsdb-tenant": state.tenant, ...(payload ? { "content-type": "application/json" } : {}) };
+    const key = sessionStorage.getItem("swsdb.key");
+    if (key) headers["api-key"] = key;
+    const t0 = performance.now();
+    let r, text;
+    try { r = await fetch(`/qdrant/${path.value.replace(/^\/+/, "")}`, { method: method.value, headers, body: payload }); text = await r.text(); }
+    catch { fill(out, h("pre", { class: "codeblock wrap drawer-error" }, "can't reach the swsdb server")); return; }
+    let shown = text;
+    try { shown = JSON.parse(text); } catch { /* not JSON */ }
+    fill(out, card(cardHead(`${r.status} ${r.statusText}`, `${Math.round(performance.now() - t0)} ms`, copyButton(text)),
+      h("div", { class: `card-pad jtree${r.ok ? "" : " drawer-error"}` }, typeof shown === "string" ? h("pre", { class: "codeblock wrap" }, shown) : jsonTree(shown, 3))));
+  }
+  bodyIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(); });
+  fill(root, card(cardHead("Qdrant API", "Qdrant's own REST API, as the Qdrant client sees it: this project's collections only, by their own names. Writes need the admin key.", preset),
+    h("div", { class: "card-pad stack" }, h("div", { class: "row" }, method, h("span", { class: "mono muted" }, "/qdrant/"), path, btn("Send", run, { kind: "primary", ico: "play" })),
+      bodyIn, h("div", { class: "tiny muted" }, "Ctrl+Enter sends. Cluster, aliases, snapshots and shards aren't available here: they reach beyond the project."))), out);
 }
 
 // ------------------------------------------------------------------ table editor: browse the tenant's SQL tables like a spreadsheet
@@ -1519,46 +2134,49 @@ function rowDrawer(table, cols, row) {
   document.body.append(scrim, drawer);
 }
 
-async function dataTables(root, selected) {
+async function dataTables(root, selected, sub = "rows") {
   const list = await guard(() => sql(TABLES_SQL));
   if (!list) return;
   const tables = list.rows.map(([name, kind, columns, rows, bytes]) => ({ name, kind, columns, rows, bytes }));
-  const side = h("div", { class: "card flush tables-side" });
-  const main = h("div", { class: "stack" });
-  const find = h("input", { placeholder: "Search tables", "aria-label": "Search tables" });
-  const drawSide = () => {
-    const q = find.value.trim().toLowerCase();
-    const shown = tables.filter((t) => !q || t.name.toLowerCase().includes(q));
-    fill(side, h("div", { class: "card-pad stack tight" }, h("div", { class: "row between" }, h("b", {}, "Tables"),
-        h("span", { class: "tiny muted" }, plural(tables.length, "table"))), find),
-      h("div", { class: "table-links" },
-        h("a", { href: "#data/tables", class: !selected ? "on" : null }, icon("overview"), "All tables"),
-        shown.map((t) => h("a", { href: `#data/tables/${encodeURIComponent(t.name)}`, class: t.name === selected ? "on" : null,
-          title: `${t.kind} · ${t.rows === null ? "rows unknown" : `about ${num(t.rows)} rows`}` },
-          icon(t.kind === "table" ? "database" : "file"), h("span", { class: "ellipsis" }, t.name),
-          h("span", { class: "tiny muted" }, t.rows === null ? "" : num(t.rows))))));
-  };
-  find.addEventListener("input", drawSide);
-  drawSide();
-  fill(root, h("div", { class: "tables-layout" }, side, main));
-  if (!selected || !tables.some((t) => t.name === selected)) {
-    const admin = (await role()) === "admin";
-    fill(main, card(cardHead("Database tables", "Every table and view in this tenant's schema. Counts and sizes are Postgres's estimates.",
-        admin ? btn("New table", () => tableDesigner(tables, (n) => { location.hash = `data/tables/${encodeURIComponent(n)}`; }), { kind: "primary", ico: "plus" }) : null),
-      table([{ label: "Name", mono: true, get: (t) => t.name },
-             { label: "Kind", get: (t) => h("span", { class: "small muted" }, t.kind) },
-             { label: "Columns", num: true, get: (t) => num(t.columns) },
-             { label: "Rows (estimated)", num: true, get: (t) => num(t.rows) },
-             { label: "Size (estimated)", num: true, get: (t) => bytesText(t.bytes) }], tables,
-        { onRow: (t) => { location.hash = `data/tables/${encodeURIComponent(t.name)}`; },
-          emptyView: h("div", { class: "card-pad" }, empty("database", "No tables yet", "Create one in the SQL tab, e.g. CREATE TABLE notes (id int PRIMARY KEY, body text).")) }),
-      h("div", { class: "card-pad tiny muted" }, plural(tables.length, "table"))));
+  const open = (n, s = "rows") => { location.hash = `tables/table/${encodeURIComponent(n)}${s === "rows" ? "" : `/${s}`}`; };
+  if (selected && tables.some((t) => t.name === selected)) {
+    const t = tables.find((x) => x.name === selected);
+    const main = h("div", { class: "stack" });
+    fill(root, h("div", { class: "vpage" },
+      h("a", { href: "#tables", class: "vback" }, "← Tables"),
+      h("h2", { class: "vtitle" }, h("span", { class: "mono" }, selected), h("span", { class: "vchip" }, t.kind),
+        h("span", { class: "vtitle-sub" }, `${plural(Number(t.columns), "column")} · about ${num(t.rows)} rows · ${bytesText(t.bytes)}`)),
+      h("div", { class: "vtabs", role: "tablist" }, [["rows", "Rows"], ["structure", "Structure"], ["api", "API"]].map(([k, l]) =>
+        h("button", { type: "button", role: "tab", class: k === sub ? "on" : null, onclick: () => open(selected, k) }, l))),
+      main));
+    await tableGrid(main, selected, sub);
     return;
   }
-  await tableGrid(main, selected);
+  const admin = (await role()) === "admin";
+  const search = h("input", { placeholder: "Search tables", class: "grow", "aria-label": "Search tables" });
+  const box = h("div");
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    fill(box, table([
+      { label: "Name", get: (t) => h("a", { href: `#tables/table/${encodeURIComponent(t.name)}`, class: "vlink mono" }, t.name) },
+      { label: "Kind", get: (t) => h("span", { class: "vtag" }, t.kind) },
+      { label: "Columns", num: true, get: (t) => num(t.columns) },
+      { label: "Rows (estimated)", num: true, get: (t) => num(t.rows) },
+      { label: "Size (estimated)", num: true, get: (t) => bytesText(t.bytes) }],
+      tables.filter((t) => !q || t.name.toLowerCase().includes(q)),
+      { onRow: (t) => open(t.name),
+        emptyView: h("div", { class: "card-pad" }, empty("table", tables.length ? "No table matches" : "No tables yet",
+          tables.length ? null : "Create one with New table, in the SQL tab, or from your app's own migrations (see Connect).")) }));
+  };
+  search.addEventListener("input", draw);
+  fill(root, h("div", { class: "vpage" },
+    h("div", { class: "row between" }, h("h2", { class: "vtitle" }, "Tables", h("span", { class: "vtitle-sub" }, plural(tables.length, "table"))),
+      admin ? btn("New table", () => tableDesigner(tables, (n) => open(n)), { kind: "primary", ico: "plus" }) : null),
+    h("div", { class: "vsearch" }, icon("search"), search), card(box)));
+  draw();
 }
 
-async function tableGrid(main, name) {
+async function tableGrid(main, name, sub = "rows") {
   const colRes = await guard(() => sql(COLUMNS_SQL, [name]));
   if (!colRes) return;
   const cols = colRes.rows.map(([column_name, data_type, udt_name, is_nullable, column_default, pk]) =>
@@ -1566,7 +2184,8 @@ async function tableGrid(main, name) {
   const keys = cols.filter((c) => c.pk).map((c) => c.column_name);
   const admin = (await role()) === "admin";
   const editable = admin && keys.length > 0;  // a row is found again by its key: without one, edits could hit several rows
-  let page = 0, size = 100, sort = null, filters = [], view = "data", total = null, rows = [], loading = 0, extras = null;
+  let page = 0, size = 100, sort = null, filters = [], total = null, rows = [], loading = 0, extras = null;
+  const view = { rows: "data", structure: "definition", api: "api" }[sub] || "data";
   const box = h("div", { class: "stack" });
   const filterBox = h("div", { class: "stack tight" });
 
@@ -1621,11 +2240,6 @@ async function tableGrid(main, name) {
     const from = rows.length ? page * size + 1 : 0, to = page * size + rows.length;
     const sizeSel = h("select", { "aria-label": "Rows per page", onchange: (e) => { size = Number(e.target.value); page = 0; load(); } },
       [50, 100, 500].map((n) => h("option", { value: n, selected: n === size }, `${n} rows`)));
-    const tabs = h("div", { class: "tabs" }, [["data", "Data"], ["definition", "Definition"], ["api", "API"]].map(([k, l]) =>
-      h("button", { type: "button", class: view === k ? "on" : null, onclick: () => {
-        view = k; draw();
-        if (k === "definition" && !extras) definitionExtras(name).then((x) => { extras = x; draw(); });
-      } }, l)));
     const grid = view === "data"
       ? (rows.length ? h("div", { class: "grid-wrap" }, h("table", { class: "sheet" },
           h("thead", {}, h("tr", {}, h("th", { class: "rownum" }, "#"), cols.map(header))),
@@ -1638,9 +2252,9 @@ async function tableGrid(main, name) {
                { label: "Nullable", get: (c) => (c.nullable ? "yes" : h("b", {}, "no")) },
                { label: "Default", mono: true, get: (c) => c.column_default || h("span", { class: "muted" }, "-") }], cols);
     fill(box, card(
-      h("div", { class: "card-head" }, h("div", {}, h("h2", { class: "mono" }, name),
-          h("div", { class: "sub" }, total === null ? "" : `${num(from)}–${num(to)} of ${num(total)} rows${filters.length ? " matching the filters" : ""} · ${plural(cols.length, "column")}`)),
-        h("div", { class: "row" }, tabs, editable && view === "data" ? btn("Insert row", () => rowEditor(name, cols, null, keys, load), { kind: "primary", ico: "plus" }) : null,
+      h("div", { class: "card-head" }, h("div", {}, h("h2", {}, view === "data" ? "Rows" : view === "definition" ? "Columns" : "Use it from code"),
+          h("div", { class: "sub" }, view !== "data" ? plural(cols.length, "column") : total === null ? "" : `${num(from)}–${num(to)} of ${num(total)} rows${filters.length ? " matching the filters" : ""}`)),
+        h("div", { class: "row" }, editable && view === "data" ? btn("Insert row", () => rowEditor(name, cols, null, keys, load), { kind: "primary", ico: "plus" }) : null,
           btn("", load, { ico: "refresh", title: "Refresh" }),
           btn("CSV", () => download(`${name}.csv`, csv({ columns: cols.map((c) => c.column_name), rows })), { ico: "download", title: "Download this page as CSV" }))),
       view === "data" ? h("div", { class: "card-pad" }, filterBox) : null,
@@ -1651,11 +2265,12 @@ async function tableGrid(main, name) {
           h("span", { class: "small muted" }, `page ${page + 1} of ${num(pages)}`),
           btn("Next", () => { if (page + 1 < pages) { page++; load(); } })), sizeSel) : null),
       view === "definition" ? extras : null,
-      view === "definition" && admin ? columnTools(name, () => tableGrid(main, name)) : null,
+      view === "definition" && admin ? columnTools(name, () => tableGrid(main, name, sub)) : null,
       view === "api" ? tableApi(name, cols) : null);
   }
   fill(main, box);
   drawFilters();
+  if (view === "definition") definitionExtras(name).then((x) => { extras = x; draw(); });
   await load();
 }
 
@@ -1995,7 +2610,7 @@ async function dataSchema(root) {
       g.append(s("text", { x: 12, y, class: c.pk ? "cname pkcol" : "cname" }, `${c.pk ? "⚿ " : ""}${c.name}`),
         s("text", { x: BW - 10, y, "text-anchor": "end", class: "ctype" }, `${c.type}${c.nullable ? "" : " !"}`));
     });
-    g.addEventListener("click", () => { location.hash = `data/tables/${encodeURIComponent(n)}`; });
+    g.addEventListener("click", () => { location.hash = `tables/table/${encodeURIComponent(n)}`; });
     svg.append(g);
   }
   fill(root, card(cardHead("Schema", `${plural(tables.size, "table")} · ${plural(fks.length, "foreign key")}. Lines link a foreign key to the column it references; ! marks NOT NULL. Click a table to open it.`),
@@ -2284,7 +2899,7 @@ function columnTools(table, done) {
       }, { ico: "plus" })),
       h("div", { class: "row" }, confirmName, btn("Delete table", async () => {
         if (confirmName.value.trim() !== table) { showError(`Type ${table} to confirm.`); return; }
-        if (await guard(() => sqlWrite(`DROP TABLE ${ident(table).replaceAll("%%", "%")}`))) { toast(`Deleted ${table}`, "info"); location.hash = "data/tables"; }
+        if (await guard(() => sqlWrite(`DROP TABLE ${ident(table).replaceAll("%%", "%")}`))) { toast(`Deleted ${table}`, "info"); location.hash = "tables"; }
       }, { kind: "danger", ico: "trash" }))));
 }
 
@@ -2327,7 +2942,7 @@ const OBJECTS = {
 async function dataDatabase(root, which) {
   const kind = OBJECTS[which] ? which : "functions";
   const tabs = h("div", { class: "tabs" }, Object.entries(OBJECTS).map(([k, [label]]) =>
-    h("button", { type: "button", class: k === kind ? "on" : null, onclick: () => { location.hash = `data/database/${k}`; } }, label)));
+    h("button", { type: "button", class: k === kind ? "on" : null, onclick: () => { location.hash = `tables/database/${k}`; } }, label)));
   const r = await guard(() => sql(OBJECTS[kind][1], null, 1000));
   if (!r) return;
   const blurb = {
@@ -2359,7 +2974,7 @@ view.reports = async (root, _arg, actions) => {
   const pinned = r.queries.filter((q) => q.pinned);
   if (!pinned.length) {
     fill(root, card(empty("eval", "No reports yet", "Save a query in Data → SQL and pin it (☆): it shows here as a live chart, run fresh each time you open this page.",
-      btn("Open the SQL editor", () => { location.hash = "data/sql"; }, { kind: "primary" }))));
+      btn("Open the SQL editor", () => { location.hash = "tables/sql"; }, { kind: "primary" }))));
     return;
   }
   const widgets = pinned.map((q) => {
@@ -2367,7 +2982,7 @@ view.reports = async (root, _arg, actions) => {
     (async () => {
       const res = await sql(q.query, null, 500).catch((e) => ({ error: e.message }));
       const head = cardHead(q.name, res.error ? "the query failed" : `${plural(res.row_count, "row")} · updated ${rel(q.updated_at)}`,
-        btn("", () => { sessionStorage.setItem("swsdb.sqlload", q.query); location.hash = "data/sql"; }, { ico: "play", title: "Open in the SQL editor" }),
+        btn("", () => { sessionStorage.setItem("swsdb.sqlload", q.query); location.hash = "tables/sql"; }, { ico: "play", title: "Open in the SQL editor" }),
         btn("", async () => { if (await guard(() => api("PUT", `/v1/sql/saved/${encodeURIComponent(q.name)}`, { query: q.query, pinned: false }))) route(); },
           { ico: "x", title: "Unpin from reports" }));
       if (res.error) { fill(box, head, h("div", { class: "card-pad small" }, res.error)); return; }
@@ -2393,9 +3008,13 @@ async function openPalette() {
   (async () => {
     const [cols, tbls, saved] = await Promise.all([api("GET", "/v1/collections").catch(() => ({ collections: [] })),
       sql(TABLES_SQL).catch(() => ({ rows: [] })), api("GET", "/v1/sql/saved").catch(() => ({ queries: [] }))]);
-    for (const c of cols.collections) extra.push({ group: "Collections", label: c.name, sub: [c.vector && "vectors", c.graph && "graph"].filter(Boolean).join(" · "), go: `#collections/${encodeURIComponent(c.name)}` });
-    for (const [n, k, , rows] of tbls.rows) extra.push({ group: "Tables", label: n, sub: `${k} · ${rows === null ? "" : `${num(rows)} rows`}`, go: `#data/tables/${encodeURIComponent(n)}` });
-    for (const q of saved.queries) extra.push({ group: "Saved queries", label: q.name, sub: q.query, go: "#data/sql", query: q.query });
+    const docNames = new Set((state.collections.length ? state.collections : await documentCollections().catch(() => [])).map((c) => c.name));
+    for (const c of cols.collections) {
+      extra.push({ group: "Collections", label: c.name, sub: [docNames.has(c.name) && "documents", c.vector && "vectors", c.graph && "graph"].filter(Boolean).join(" · "),
+        go: docNames.has(c.name) ? `#collections/${encodeURIComponent(c.name)}` : c.vector ? `#vectors/${encodeURIComponent(c.name)}` : "#graph/cypher" });
+    }
+    for (const [n, k, , rows] of tbls.rows) extra.push({ group: "Tables", label: n, sub: `${k} · ${rows === null ? "" : `${num(rows)} rows`}`, go: `#tables/table/${encodeURIComponent(n)}` });
+    for (const q of saved.queries) extra.push({ group: "Saved queries", label: q.name, sub: q.query, go: "#tables/sql", query: q.query });
     draw();
   })();
   async function documents(q) {
@@ -2706,16 +3325,19 @@ function rpcDrawer(fn) {
 function setConn(kind, text) { const c = $("#conn"); c.className = `conn ${kind}`; fill(c, h("span", { class: "d" }), h("span", {}, text)); }
 function clearTimers() { state.timers.forEach((t) => clearTimeout(t)); state.timers = []; }
 function currentPage() { const p = (location.hash.slice(1) || "overview").split("/")[0]; return PAGES[p] ? p : "overview"; }
+function pageSub(name) { const e = PAGES[name].engine && engineOf(PAGES[name].engine); return e ? `${e} · ${PAGES[name].sub}` : PAGES[name].sub; }
 
 async function route(quiet = false) {
   if (state.offline) return;
+  const moved = movedHash(location.hash.slice(1));
+  if (moved) { window.history.replaceState(null, "", `#${moved}`); }
   clearTimers();
   const name = currentPage();
   const rest = location.hash.slice(1).split("/").slice(1);
   const arg = rest.length ? decodeURIComponent(rest.join("/")) : undefined;
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.page === name));
   $("#title").textContent = PAGES[name].title;
-  $("#subtitle").textContent = PAGES[name].sub;
+  $("#subtitle").textContent = pageSub(name);
   document.title = `${PAGES[name].title} · swsdb`;
   if (quiet) {  // background refresh: render off-screen, swap in when ready so nothing flickers
     const tmp = h("div"), tmpActions = h("div");
@@ -2731,6 +3353,9 @@ async function health() {
   if (state.offline) return;
   try {
     const body = await (await fetch("/readyz", { cache: "no-store" })).json();
+    const first = !state.engines;
+    state.engines = body.engines || {};
+    if (first) { showEngines(); $("#subtitle").textContent = pageSub(currentPage()); }
     setConn(body.status === "ready" ? "ok" : body.status === "starting" ? "warn" : "bad",
             body.status === "ready" ? "all engines ready" : body.status);
   } catch { goOffline(); }
@@ -2767,12 +3392,25 @@ async function applyKey() {
   drawKeyButton();
 }
 
+// pages for engines this server doesn't run are hidden; each data page names its engine on hover
+function showEngines() {
+  for (const a of document.querySelectorAll("#nav a")) {
+    const pg = PAGES[a.dataset.page];
+    const cap = pg.engine || pg.needs;
+    if (cap) a.hidden = !(cap in state.engines);
+    if (pg.engine && engineOf(pg.engine)) a.title = `${pg.title} · ${engineOf(pg.engine)}`;
+  }
+}
+
 function init() {
   fill($("#brand-mark"), icon("database"));
   const link = (p) => h("a", { href: `#${p}`, "data-page": p, title: PAGES[p].title },
     icon(PAGES[p].icon), h("span", { class: "t" }, PAGES[p].title.replace(" explorer", "")));
   const section = (name) => h("div", { class: "nav-label" }, h("span", { class: "t" }, name));
-  fill($("#nav"), section("Data"), ["overview", "collections", "search", "graph", "data", "storage", "reports"].map(link),
+  fill($("#nav"), link("overview"),
+    section("Databases"), ["tables", "vectors", "graph"].map(link),
+    section("Documents"), ["collections", "search"].map(link),
+    section("Workspace"), ["storage", "reports"].map(link),
     section("Quality"), ["eval", "doctor", "advisors", "logs"].map(link),
     section("Admin"), ["users", "policies", "keys", "backups"].map(link));
   setTheme(localStorage.getItem("swsdb.theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));

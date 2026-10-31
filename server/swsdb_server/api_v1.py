@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from . import answer as answer_mod
-from . import observe
+from . import graph_views, observe, vector_views
 from .advisors import run_advisors
 from .auth import Caller
 from .dataapi import query_stats, roles_of
@@ -171,6 +171,32 @@ class Search(BaseModel):
     limit: int = Field(10, ge=1, le=1000)
     where: dict[str, Any] | None = None
     with_payload: bool = True
+
+
+class Similar(BaseModel):
+    like: str | int | None = None  # a point's id: its own vector is the query (any kind: dense, sparse, multivector)
+    vector: list[Any] | None = None
+    using: str = ""  # which named vector ("" for the collection's only vector)
+    limit: int = Field(10, ge=1, le=100)
+    where: dict[str, Any] | None = None
+
+
+class Recall(BaseModel):
+    samples: int = Field(50, ge=1, le=200)
+    k: int = Field(10, ge=1, le=100)
+    using: str = ""
+
+
+class MapRequest(BaseModel):
+    limit: int = Field(1000, ge=3, le=3000)
+    using: str = ""
+    color_by: str | None = Field(None, max_length=200)
+    where: dict[str, Any] | None = None
+
+
+class PayloadIndex(BaseModel):
+    field: str = Field(min_length=1, max_length=200)
+    type: str
 
 
 class Cypher(BaseModel):
@@ -520,6 +546,75 @@ def router(caller) -> APIRouter:
         hits = await e.vector.search(engine_name(t, name), body.vector, body.limit, body.where, body.with_payload)
         return {"hits": hits}
 
+    # -------------------------------------------------------------- a closer look (the console's vector views)
+
+    async def raw_collection(t: str, name: str, e: Engines) -> None:
+        d = e.app.state.docs
+        is_docs = await d.is_document_collection(t, name) if d is not None else await e.vector.is_documents(
+            engine_name(t, name))
+        if is_docs:
+            raise HTTPException(409, f"{name!r} is a documents collection: swsdb manages its indexes")
+
+    @r.get("/collections/{name}/inspect", tags=["vectors"])
+    async def inspect_collection(name: str = Depends(collection_name), t: str = Depends(tenant),
+                                 e: Engines = Depends(), _: str = Depends(require_key)):
+        """How a vector collection is set up: named, sparse and multi vectors, payload indexes, segments, status."""
+        return await vector_views.inspect(e.vector, engine_name(t, name))
+
+    @r.get("/collections/{name}/memory", tags=["vectors"])
+    async def collection_memory(name: str = Depends(collection_name), t: str = Depends(tenant),
+                                e: Engines = Depends(), _: str = Depends(require_key)):
+        """Where the collection's bytes are, per vector, payload and payload index."""
+        return await vector_views.memory(e.vector, engine_name(t, name))
+
+    @r.get("/collections/{name}/segments", tags=["vectors"])
+    async def collection_segments(name: str = Depends(collection_name), t: str = Depends(tenant),
+                                  e: Engines = Depends(), _: str = Depends(require_key)):
+        """The collection's segments and optimizations (Qdrant)."""
+        return await vector_views.segments(e.vector, engine_name(t, name))
+
+    @r.post("/collections/{name}/similar", tags=["vectors"])
+    async def similar_points(body: Similar, name: str = Depends(collection_name), t: str = Depends(tenant),
+                             e: Engines = Depends(), role: str = Depends(require_key)):
+        """Nearest neighbours of a point (`like`: its id) or of a vector, on one named vector."""
+        if (body.like is None) == (body.vector is None):
+            raise HTTPException(422, "send either like (a point id) or vector")
+        await documents_guard(t, name, e, role, "raw vector search")
+        hits = await vector_views.similar(e.vector, engine_name(t, name), like=body.like, vector=body.vector,
+                                          using=body.using, limit=body.limit, where=body.where)
+        return {"hits": hits}
+
+    @r.post("/collections/{name}/recall", tags=["vectors"])
+    async def index_recall(body: Recall, name: str = Depends(collection_name), t: str = Depends(tenant),
+                           e: Engines = Depends(), role: str = Depends(require_key)):
+        """How good the approximate index is: recall@k of HNSW search against an exact scan, on random points."""
+        await documents_guard(t, name, e, role, "measuring the index")
+        return await vector_views.recall(e.vector, engine_name(t, name), body.samples, body.k, body.using)
+
+    @r.post("/collections/{name}/map", tags=["vectors"])
+    async def vector_map(body: MapRequest, name: str = Depends(collection_name), t: str = Depends(tenant),
+                         e: Engines = Depends(), role: str = Depends(require_key)):
+        """Up to `limit` points projected to 2D (PCA), each with a payload value to colour it by."""
+        await documents_guard(t, name, e, role, "mapping raw points")
+        return await vector_views.project(e.vector, engine_name(t, name), body.limit, body.using, body.color_by,
+                                          body.where)
+
+    @r.put("/collections/{name}/index", tags=["vectors"])
+    async def create_payload_index(body: PayloadIndex, name: str = Depends(collection_name),
+                                   t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(admin),
+                                   __: None = Depends(writable)):
+        """Index a payload field, so filters on it are fast (Qdrant). Not for documents collections."""
+        await raw_collection(t, name, e)
+        await vector_views.create_index(e.vector, engine_name(t, name), body.field, body.type)
+        return {"indexed": body.field, "type": body.type}
+
+    @r.delete("/collections/{name}/index/{field}", tags=["vectors"])
+    async def drop_payload_index(field: str, name: str = Depends(collection_name), t: str = Depends(tenant),
+                                 e: Engines = Depends(), _: str = Depends(admin), __: None = Depends(writable)):
+        await raw_collection(t, name, e)
+        await vector_views.drop_index(e.vector, engine_name(t, name), field)
+        return {"dropped": field}
+
     # -------------------------------------------------------------- graph
 
     @r.post("/collections/{name}/cypher", tags=["graph"])
@@ -540,6 +635,16 @@ def router(caller) -> APIRouter:
         not_in_maintenance(request)
         async with request.app.state.cluster.changing(wait=False):
             return await g.query(key, body.query, body.params, read_only=False, timeout_s=body.timeout_s)
+
+    @r.get("/collections/{name}/graph", tags=["graph"])
+    async def graph_info(name: str = Depends(collection_name), t: str = Depends(tenant), e: Engines = Depends(),
+                         _: str = Depends(require_key)):
+        """What the collection's graph holds: labels and relationship types with counts, property keys, which labels
+        connect to which, and memory (FalkorDB)."""
+        key = engine_name(t, name)
+        if not await e.graph.exists(key):
+            raise NotFound(f"collection {name!r} has no graph (create it with graph: true)")
+        return await graph_views.info(e.graph, key)
 
     # -------------------------------------------------------------- documents
 

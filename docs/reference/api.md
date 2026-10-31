@@ -66,6 +66,14 @@ Document ids may contain `/`; encode them in the path (`a%2Fb`).
 | `POST /v1/collections/{name}/points/scroll` | `{"limit": 50, "offset": null, "where": {...}, "with_vector": false}`: a page of points in id order, and `next` for the following page |
 | `POST /v1/collections/{name}/points/delete` | `{"ids": [...]}` |
 | `POST /v1/collections/{name}/search` | `{"vector", "limit", "where", "with_payload"}` |
+| `GET /v1/collections/{name}/inspect` | its configuration: vectors (named, sparse, multivector), payload indexes, HNSW, optimizer, segments, status |
+| `GET /v1/collections/{name}/memory` | disk, RAM and cache per vector, sparse vector, payload and payload index (lite: table and index sizes) |
+| `GET /v1/collections/{name}/segments` | segments and optimizations (Qdrant) |
+| `POST /v1/collections/{name}/similar` | `{"like": <point id> or "vector": [...], "using": "<vector name>", "limit", "where"}`: nearest neighbours by any named vector, including sparse and multivectors; the point itself is left out |
+| `POST /v1/collections/{name}/recall` | `{"samples": 50, "k": 10, "using": ""}`: recall@k of the approximate index against an exact scan, on random points (Qdrant) |
+| `POST /v1/collections/{name}/map` | `{"limit": 1000, "using": "", "color_by": "field.path", "where"}`: points projected to 2D (PCA), each with the field's value |
+| `PUT /v1/collections/{name}/index`, `DELETE /v1/collections/{name}/index/{field}` | `{"field", "type": "keyword"/"integer"/"float"/"bool"/"geo"/"datetime"/"text"/"uuid"}` payload indexes, admin, not on documents collections (Qdrant) |
+| `GET /v1/collections/{name}/graph` | what the graph holds: `nodes`, `edges`, `labels` and `relationships` with counts, `property_keys`, `schema` (which labels connect to which, by type, with counts) and `memory_bytes` (FalkorDB); not with Neo4j |
 | `POST /v1/collections/{name}/cypher` | `{"query", "params", "read_only", "timeout_s"}` (`LOAD CSV` is refused) |
 
 On documents collections, search, points/get, points/scroll and Cypher need the admin key (they would skip document readers).

@@ -104,6 +104,28 @@ def test_documents_vectors_graph_and_sql(lite, data):
     assert data.reconcile()["issues"] == 0
 
 
+def test_the_consoles_vector_views(lite, data):
+    """Configuration, memory (table and index sizes) and the map work on pgvector; Qdrant's own views say so."""
+    import httpx
+
+    c = httpx.Client(base_url=f"http://127.0.0.1:{lite.port}/v1/collections", headers={"api-key": ADMIN}, timeout=60)
+    ins = c.get("/raw/inspect").json()
+    assert ins["engine"] == "pgvector" and ins["vectors"][0]["size"] == 3 and ins["points"] == 2
+    mem = c.get("/kb/memory").json()
+    assert mem["engine"] == "pgvector" and mem["total"]["disk_bytes"] > 0
+    m = c.post("/kb/map", json={"limit": 50, "color_by": "doc"}).json()
+    assert len(m["points"]) >= 3 and {p["label"] for p in m["points"]} >= {"falcon", "harrier"}
+    assert [h["id"] for h in c.post("/raw/similar", json={"like": "p1", "limit": 2}).json()["hits"]] == [2]
+    g = c.get("/raw/graph").json()  # the graph browser's summary, from Apache AGE
+    assert g["engine"] == "age" and g["nodes"] == 2 and g["edges"] == 1
+    assert g["labels"] == [{"name": "Person", "count": 2}] and g["relationships"] == [{"name": "KNOWS", "count": 1}]
+    assert g["schema"] == [{"from": "Person", "type": "KNOWS", "to": "Person", "count": 1}]
+    assert {"name", "since"} <= set(g["property_keys"]) or "name" in g["property_keys"]
+    for r in (c.get("/raw/segments"), c.post("/raw/recall", json={}),
+              c.put("/raw/index", json={"field": "team", "type": "keyword"})):
+        assert r.status_code == 409 and "lite profile" in r.json()["message"]
+
+
 def test_a_tenant_reaches_neither_another_graph_nor_the_vector_tables(lite, data):
     root = client(lite)
     acme = client(lite, root.create_key("admin", "lite-acme", tenant="acme")["key"])
