@@ -664,3 +664,6 @@ svg.schemaview .fk { fill: none; stroke: var(--accent); stroke-width: 1.6; opaci
 .gb-table { max-height: 640px; overflow: auto; }
 .gb-empty { padding: 40px 16px; }
 @media (max-width: 900px) { .gb { grid-template-columns: 1fr; } .gb-side { position: static; max-height: none; } }
+
+.drawer .grow > input, .drawer .grow > select, .drawer .grow > textarea { width: 100%; }
+.tight-bottom { padding-bottom: 0; }

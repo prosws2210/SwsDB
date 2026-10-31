@@ -89,6 +89,9 @@ async def segments(store, name: str) -> dict:
 
 def _one_vector(v: Any, using: str) -> Any:
     if isinstance(v, dict) and "indices" not in v:  # named vectors
+        dense = [k for k, x in v.items() if not (isinstance(x, dict) and "indices" in x)]
+        if using == "" and len(dense) == 1:  # one dense vector among them (a documents collection): that one
+            return v[dense[0]]
         if using not in v:
             raise StoreError(f"no vector named {using!r}; this collection has {', '.join(sorted(v)) or 'none'}")
         return v[using]
@@ -102,6 +105,8 @@ async def recall(store, name: str, samples: int = 50, k: int = 10, using: str = 
     _qdrant(store)
     info = await inspect(store, name)
     dense = {v["name"]: v for v in info["vectors"]}
+    if using == "" and len(dense) == 1:
+        using = next(iter(dense))
     if using not in dense:
         raise StoreError(f"no dense vector named {using!r}; this collection has "
                          f"{', '.join(repr(n) for n in dense) or 'none'}")

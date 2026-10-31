@@ -1567,7 +1567,7 @@ function movedHash(hash) {
 }
 
 // a result worth a chart: a label (or date) column and a number column, a handful of rows
-function resultChart(res) {
+function resultChart(res, { bare = false } = {}) {
   if (res.rows.length < 2 || res.rows.length > 100 || res.columns.length < 2) return null;
   const isNum = (v) => v !== null && v !== "" && !Number.isNaN(Number(v)) && typeof v !== "boolean";
   const numeric = res.columns.map((_, i) => i).filter((i) => i > 0 && res.rows.every((r) => isNum(r[i])));
@@ -1581,7 +1581,8 @@ function resultChart(res) {
     const pick = numeric.length > 1 ? h("select", { "aria-label": "Column to chart", onchange: (e) => draw(Number(e.target.value)) },
       numeric.map((i) => h("option", { value: i, selected: i === yi }, res.columns[i]))) : null;
     if (isDate) points.sort((a, b) => a.x.localeCompare(b.x));
-    fill(box, cardHead(`${res.columns[yi]} by ${res.columns[xi]}`, isDate ? "From the result above; hover a bar for its value" : "From the result above", pick),
+    fill(box, bare ? (pick ? h("div", { class: "row end card-pad tight-bottom" }, pick) : null)
+      : cardHead(`${res.columns[yi]} by ${res.columns[xi]}`, isDate ? "From the result above; hover a bar for its value" : "From the result above", pick),
       h("div", { class: "card-pad" }, isDate ? columnChart(points, { label: (p) => p.x.slice(0, 10) })
         : barList(points.slice(0, 30).map((p) => ({ label: p.x, count: p.y })))));
   };
@@ -1794,12 +1795,14 @@ async function vecPoints(root, { coll, ins, isDocs }) {
   if (usingSel) usingSel.addEventListener("change", () => { if (simIn.value.trim()) run(); });
   const clear = (el) => btn("", () => { el.value = ""; run(); }, { ico: "x", title: "Clear" });
 
+  const isDistance = (using) => /euclid|manhattan/i.test(((ins.vectors.find((v) => v.name === using) || {}).distance) || "");
   function cardFor(p) {
     const vecs = p.vector && !Array.isArray(p.vector) && typeof p.vector === "object" && !Array.isArray(p.vector.indices)
       ? Object.entries(p.vector) : p.vector ? [["", p.vector]] : [];
     const len = (v) => (Array.isArray(v) ? (Array.isArray(v[0]) ? `${v.length} × ${v[0].length}` : v.length) : v && Array.isArray(v.indices) ? v.indices.length : "-");
     return h("div", { class: "card pcard" },
-      h("div", { class: "pcard-head" }, h("b", {}, `Point ${p.id}`), p.score != null ? h("span", { class: "vtag" }, `score ${fmt(p.score, 4)}`) : null,
+      h("div", { class: "pcard-head" }, h("b", {}, `Point ${p.id}`), p.score != null ? h("span", { class: "vtag", title: similar && isDistance(similar.using) ? "Distance: smaller is closer" : "Similarity: larger is closer" },
+          `${similar && isDistance(similar.using) ? "distance" : "score"} ${fmt(p.score, 4)}`) : null,
         h("span", { class: "grow" }), copyButton(JSON.stringify({ id: p.id, payload: p.payload }, null, 2))),
       h("div", { class: "pcard-body" },
         h("div", { class: "pcard-label" }, "Payload"), h("div", { class: "jtree" }, jsonTree(p.payload || {}, 3)),
@@ -2261,12 +2264,13 @@ async function tableGrid(main, name, sub = "rows") {
                { label: "Type", mono: true, get: (c) => c.data_type === "USER-DEFINED" ? c.udt_name : c.data_type },
                { label: "Nullable", get: (c) => (c.nullable ? "yes" : h("b", {}, "no")) },
                { label: "Default", mono: true, get: (c) => c.column_default || h("span", { class: "muted" }, "-") }], cols);
+    if (view === "api") { fill(box, tableApi(name, cols)); return; }
     fill(box, card(
-      h("div", { class: "card-head" }, h("div", {}, h("h2", {}, view === "data" ? "Rows" : view === "definition" ? "Columns" : "Use it from code"),
+      h("div", { class: "card-head" }, h("div", {}, h("h2", {}, view === "data" ? "Rows" : "Columns"),
           h("div", { class: "sub" }, view !== "data" ? plural(cols.length, "column") : total === null ? "" : `${num(from)}–${num(to)} of ${num(total)} rows${filters.length ? " matching the filters" : ""}`)),
         h("div", { class: "row" }, editable && view === "data" ? btn("Insert row", () => rowEditor(name, cols, null, keys, load), { kind: "primary", ico: "plus" }) : null,
-          btn("", load, { ico: "refresh", title: "Refresh" }),
-          btn("CSV", () => download(`${name}.csv`, csv({ columns: cols.map((c) => c.column_name), rows })), { ico: "download", title: "Download this page as CSV" }))),
+          view === "data" ? btn("", load, { ico: "refresh", title: "Refresh" }) : null,
+          view === "data" ? btn("CSV", () => download(`${name}.csv`, csv({ columns: cols.map((c) => c.column_name), rows })), { ico: "download", title: "Download this page as CSV" }) : null)),
       view === "data" ? h("div", { class: "card-pad" }, filterBox) : null,
       view === "data" && admin && !keys.length ? h("div", { class: "card-pad tiny muted" }, "Read-only: this table has no primary key, so a row can't be singled out for editing (the Advisors page explains how to add one).") : null,
       view === "api" ? null : grid,
@@ -2833,7 +2837,10 @@ function tableDesigner(tables, done) {
                 { name: "created_at", type: "timestamptz", def: "now()", notNull: true, pk: false, unique: false, ref: "" }];
   const preview = h("pre", { class: "codeblock wrap" });
   const list = h("div", { class: "stack tight" });
-  const refs = tables.map((t) => t.name);
+  // a foreign key points at a primary key: only tables that have one (not views, not key-less tables)
+  let refs = tables.filter((t) => t.kind === "table").map((t) => t.name);
+  sql("SELECT tc.table_name FROM information_schema.table_constraints tc WHERE tc.table_schema = current_schema() AND tc.constraint_type = 'PRIMARY KEY'")
+    .then((r) => { const keyed = new Set(r.rows.map((x) => x[0])); refs = refs.filter((n) => keyed.has(n)); draw(); }).catch(() => {});
   function statement() {
     const n = name.value.trim();
     const lines = cols.filter((c) => c.name.trim()).map((c) => {
@@ -2996,7 +3003,7 @@ view.reports = async (root, _arg, actions) => {
         btn("", async () => { if (await guard(() => api("PUT", `/v1/sql/saved/${encodeURIComponent(q.name)}`, { query: q.query, pinned: false }))) route(); },
           { ico: "x", title: "Unpin from reports" }));
       if (res.error) { fill(box, head, h("div", { class: "card-pad small" }, res.error)); return; }
-      const chart = resultChart(res);
+      const chart = resultChart(res, { bare: true });
       fill(box, head, chart ? h("div", { class: "report-chart" }, chart) : resultTable(res));
     })();
     return box;

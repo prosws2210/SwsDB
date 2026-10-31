@@ -106,4 +106,9 @@ def test_names_link_passages_without_a_model():
     names = {e["name"] for e in heuristic_entities(text).entities}
     assert names == {"Project Orion", "Priya Nair", "Kestrel Labs", "Northwind Analytics", "Pull Request"}
     assert heuristic_entities("The Monday Meeting").entities[0]["name"] == "Monday Meeting"
+    # a possessive names the person, not a new entity ("Priya Nair's team", with either apostrophe)
+    curly = chr(0x2019)  # a typographic apostrophe
+    text = f"Refunds come from Priya Nair's team. Ask Mateo Ruiz{curly}s desk."
+    names = {e["name"] for e in heuristic_entities(text).entities}
+    assert names == {"Priya Nair", "Mateo Ruiz"}
     assert heuristic_entities("Refunds take five days. Store credit is instant.").entities == []

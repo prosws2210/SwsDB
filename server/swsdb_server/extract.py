@@ -140,6 +140,8 @@ def heuristic_entities(text: str) -> Extraction:
             words = m.group(0).split()
             while words and words[0].lower() in LEADING:
                 words = words[1:]
+            if words:  # "Priya Nair's team" names Priya Nair
+                words[-1] = re.sub(r"['\u2019]s?$", "", words[-1])
             if len(words) < 2 or all(w.lower() in CALENDAR for w in words):
                 continue
             name = " ".join(words)

@@ -1060,6 +1060,9 @@ class GraphStore:
             msg = str(e)
             if "empty key" in msg.lower() or "invalid graph operation on empty key" in msg.lower():
                 raise NotFound("graph not found") from e
+            if "executed only on read-only queries" in msg:
+                raise StoreError("a read_only query can't change the graph: "
+                                 "run it with read_only false (the admin key)") from e
             raise StoreError(msg) from e
         except (aioredis.ConnectionError, aioredis.TimeoutError) as e:
             raise Unavailable(f"FalkorDB: {type(e).__name__}") from e
