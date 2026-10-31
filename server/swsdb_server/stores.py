@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import datetime as dt
 import decimal
 import hashlib
@@ -20,13 +21,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import httpx
+import orjson
 import psycopg
 import redis.asyncio as aioredis
 from psycopg import sql as pgsql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
+from . import timing
 from .names import parse_engine_name, point_id
 
 # ------------------------------------------------------------------ errors the API maps to status codes
@@ -313,9 +317,34 @@ async def run_pg(*args: str, env: dict[str, str] | None = None) -> None:
 
 
 async def _reset_session(conn) -> None:
-    """Back to the pool: drop what a pass-through statement may have left behind in the session."""
-    await conn.execute("RESET ALL")
-    await conn.execute("DISCARD TEMP")
+    """Back to the pool: drop what a pass-through statement may have left behind in the session (one round trip)."""
+    await conn.execute("RESET ALL; DISCARD TEMP")
+
+
+def _begin(read_only: bool, timeout_s: float) -> str:
+    """The transaction's start, its read-only mode and its timeout in one round trip (no parameters: the simple
+    protocol runs the statements together, and the timeout is a whole number of milliseconds)."""
+    return f"BEGIN{' READ ONLY' if read_only else ''}; SET LOCAL statement_timeout = {max(1, int(timeout_s * 1000))}"
+
+
+class _Transaction:
+    """BEGIN (with its settings) ... COMMIT, ROLLBACK on any error: what conn.transaction() does, in fewer round
+    trips. The pool's connections run in autocommit mode, so the explicit BEGIN is the transaction."""
+
+    def __init__(self, conn, read_only: bool, timeout_s: float):
+        self.conn, self.read_only, self.timeout_s = conn, read_only, timeout_s
+
+    async def __aenter__(self):
+        await self.conn.execute(_begin(self.read_only, self.timeout_s))
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            await self.conn.execute("COMMIT")
+        else:
+            with contextlib.suppress(psycopg.Error):  # a broken connection: the pool discards it
+                await self.conn.execute("ROLLBACK")
+        return False
 
 
 class SqlStore:
@@ -405,6 +434,7 @@ class SqlStore:
         self._tenant_pools.clear()
         await self.pool.close()
 
+    @timing.timed("postgres")
     async def rows(self, statement: str, params: Any = None) -> list[dict]:
         """swsdb's own statements (catalog, keys), as the swsdb role."""
         await self.migrate()
@@ -549,6 +579,7 @@ class SqlStore:
                 await conn.execute(pgsql.SQL("ALTER ROLE {} NOCREATEDB").format(pgsql.Identifier(owner)))
         return True
 
+    @timing.timed("postgres")
     async def query_as_user(self, tenant: str, user, statement, params, *, read_only: bool, timeout_s: float = 15,
                             max_rows: int = 1000) -> dict:
         """One statement swsdb wrote (the Data API, RPC), as the tenant's end-users role, with who the user is set
@@ -564,14 +595,11 @@ class SqlStore:
                     old = self._tenant_pools.pop(next(iter(self._tenant_pools)))
                     await old.close()
             self._tenant_pools[role] = pool
-            async with pool.connection(timeout=10) as conn, conn.transaction():
-                if read_only:
-                    await conn.execute("SET TRANSACTION READ ONLY")
+            async with pool.connection(timeout=10) as conn, _Transaction(conn, read_only, timeout_s):
                 await conn.execute(
-                    "SELECT set_config('statement_timeout', %s, true), set_config('swsdb.user_id', %s, true), "
-                    "set_config('swsdb.user_email', %s, true), set_config('swsdb.user_groups', %s, true)",
-                    [f"{int(timeout_s * 1000)}", user.id if user else "", user.email if user else "",
-                     ",".join(user.groups) if user else ""])
+                    "SELECT set_config('swsdb.user_id', %s, true), set_config('swsdb.user_email', %s, true), "
+                    "set_config('swsdb.user_groups', %s, true)",
+                    [user.id if user else "", user.email if user else "", ",".join(user.groups) if user else ""])
                 cur = await conn.execute(statement, params or None)
                 if cur.description is None:
                     return {"columns": [], "rows": [], "row_count": cur.rowcount, "truncated": False}
@@ -652,6 +680,7 @@ class SqlStore:
         self._tenant_pools.clear()
         await self.pool.check()
 
+    @timing.timed("postgres")
     async def query(self, statement: str, params: list | dict | None, *, read_only: bool, timeout_s: float,
                     max_rows: int, tenant: str = "default") -> dict:
         """One statement as the tenant's sandbox role, in its own transaction. Server-side prepared, so a string
@@ -660,10 +689,7 @@ class SqlStore:
         await self.migrate()
         try:
             pool = await self._pool_for(tenant)
-            async with pool.connection(timeout=10) as conn, conn.transaction():
-                if read_only:
-                    await conn.execute("SET TRANSACTION READ ONLY")
-                await conn.execute("SELECT set_config('statement_timeout', %s, true)", [f"{int(timeout_s * 1000)}"])
+            async with pool.connection(timeout=10) as conn, _Transaction(conn, read_only, timeout_s):
                 cur = await conn.execute(statement, params or None, prepare=True)
                 if cur.description is None:
                     return {"columns": [], "rows": [], "row_count": cur.rowcount, "truncated": False}
@@ -727,28 +753,50 @@ class VectorStore:
     engine = "qdrant"
 
     def __init__(self, url: str, api_key: str):
-        # identity: Qdrant otherwise gzips every reply httpx asks it to, which costs ~40 ms per search on loopback
+        self.url = url.rstrip("/")
+        self._headers = {"api-key": api_key, "accept-encoding": "identity", "content-type": "application/json"}
+        # identity: Qdrant otherwise gzips every reply it's asked to, which costs ~40 ms per search on loopback.
+        # httpx stays for streaming snapshots and the /qdrant gate's pass-through; swsdb's own calls use aiohttp
+        # (its HTTP parser is in C: ~1 ms a call where httpx took ~4)
         self.http = httpx.AsyncClient(base_url=url, timeout=30.0,
                                       headers={"api-key": api_key, "accept-encoding": "identity"})
+        self._session: aiohttp.ClientSession | None = None
 
     async def close(self) -> None:
         await self.http.aclose()
+        if self._session is not None:
+            await self._session.close()
 
-    async def _call(self, method: str, path: str, **kw) -> dict:
+    def _sess(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers=self._headers, timeout=aiohttp.ClientTimeout(total=30),
+                connector=aiohttp.TCPConnector(limit=64, keepalive_timeout=30))
+        return self._session
+
+    @timing.timed("qdrant")
+    async def _call(self, method: str, path: str, json: Any = None, params: dict | None = None) -> dict:
         try:
-            r = await self.http.request(method, path, **kw)
-        except httpx.HTTPError as e:
+            async with self._sess().request(method, self.url + path, params=params,
+                                            data=orjson.dumps(json) if json is not None else None) as r:
+                status, raw = r.status, await r.read()
+        except (aiohttp.ClientError, TimeoutError) as e:
             raise Unavailable(f"Qdrant: {type(e).__name__}") from e
-        if r.status_code == 404:
-            raise NotFound(r.json().get("status", {}).get("error", "not found") if r.content else "not found")
-        if r.status_code == 409:
-            raise Conflict(r.json().get("status", {}).get("error", "already exists"))
-        if r.status_code >= 500:
-            raise Unavailable(f"Qdrant answered {r.status_code}")
-        body = r.json()
-        if r.status_code >= 400:
-            raise StoreError(body.get("status", {}).get("error", f"Qdrant answered {r.status_code}"))
-        return body
+
+        def error(default: str) -> str:
+            try:
+                return orjson.loads(raw).get("status", {}).get("error", default)
+            except (orjson.JSONDecodeError, AttributeError):
+                return default
+        if status == 404:
+            raise NotFound(error("not found") if raw else "not found")
+        if status == 409:
+            raise Conflict(error("already exists"))
+        if status >= 500:
+            raise Unavailable(f"Qdrant answered {status}")
+        if status >= 400:
+            raise StoreError(error(f"Qdrant answered {status}"))
+        return orjson.loads(raw)
 
     async def all_names(self) -> list[str]:
         """Every collection in the engine, swsdb's or not."""
@@ -1053,6 +1101,7 @@ class GraphStore:
         await self.query(name, "MATCH (e:Entity) WHERE NOT (e)<-[:MENTIONS]-() DETACH DELETE e", None,
                          read_only=False, timeout_s=120)
 
+    @timing.timed("graph")
     async def _cmd(self, *args):
         try:
             return await self.r.execute_command(*args)

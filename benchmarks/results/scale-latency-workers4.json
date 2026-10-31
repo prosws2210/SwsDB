@@ -1,0 +1,348 @@
+{
+  "when": "2026-10-31 14:54:51",
+  "n": 200,
+  "scale": {
+    "rows": 1000000,
+    "points": 250000,
+    "edges": 1000000
+  },
+  "results": [
+    {
+      "endpoint": "sql: row by primary key",
+      "one_client": {
+        "p50": 12.23,
+        "p95": 17.37,
+        "p99": 23.16,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 14.72,
+        "p95": 30.35,
+        "p99": 69.77,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.07,
+        "encode": 0.01,
+        "postgres": 2.72,
+        "total": 4.72
+      },
+      "eight_clients_server_total": 7.97
+    },
+    {
+      "endpoint": "sql: indexed filter (customer's orders)",
+      "one_client": {
+        "p50": 13.05,
+        "p95": 19.88,
+        "p99": 37.64,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 20.31,
+        "p95": 55.77,
+        "p99": 71.8,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.07,
+        "encode": 0.01,
+        "postgres": 4.52,
+        "total": 6.49
+      },
+      "eight_clients_server_total": 13.35
+    },
+    {
+      "endpoint": "sql: join + aggregate for one customer",
+      "one_client": {
+        "p50": 11.71,
+        "p95": 23.58,
+        "p99": 42.55,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 12.55,
+        "p95": 17.93,
+        "p99": 42.95,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "encode": 0.01,
+        "postgres": 1.74,
+        "total": 3.91
+      },
+      "eight_clients_server_total": 5.65
+    },
+    {
+      "endpoint": "rest: row by filter",
+      "one_client": {
+        "p50": 12.52,
+        "p95": 15.94,
+        "p99": 20.75,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 15.66,
+        "p95": 27.66,
+        "p99": 71.82,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "encode": 0.01,
+        "postgres": 3.04,
+        "total": 4.93
+      },
+      "eight_clients_server_total": 10.0
+    },
+    {
+      "endpoint": "vectors: get 1 point",
+      "one_client": {
+        "p50": 11.06,
+        "p95": 15.09,
+        "p99": 18.55,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 14.9,
+        "p95": 27.23,
+        "p99": 45.44,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.07,
+        "encode": 0.03,
+        "qdrant": 2.14,
+        "total": 4.25
+      },
+      "eight_clients_server_total": 7.7
+    },
+    {
+      "endpoint": "vectors: search by vector (top 10)",
+      "one_client": {
+        "p50": 15.95,
+        "p95": 93.65,
+        "p99": 184.57,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 27.21,
+        "p95": 52.19,
+        "p99": 107.84,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "encode": 0.01,
+        "qdrant": 14.39,
+        "total": 16.68
+      },
+      "eight_clients_server_total": 15.86
+    },
+    {
+      "endpoint": "vectors: filtered search (category)",
+      "one_client": {
+        "p50": 101.29,
+        "p95": 209.47,
+        "p99": 263.1,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 542.34,
+        "p95": 945.4,
+        "p99": 1139.65,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "encode": 0.01,
+        "qdrant": 98.03,
+        "total": 100.82
+      },
+      "eight_clients_server_total": 506.56
+    },
+    {
+      "endpoint": "vectors: similar to a point",
+      "one_client": {
+        "p50": 15.29,
+        "p95": 23.49,
+        "p99": 39.68,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 29.53,
+        "p95": 45.47,
+        "p99": 60.53,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.07,
+        "encode": 0.01,
+        "postgres": 0.03,
+        "qdrant": 5.87,
+        "total": 8.23
+      },
+      "eight_clients_server_total": 16.57
+    },
+    {
+      "endpoint": "graph: 1 hop (who a person knows)",
+      "one_client": {
+        "p50": 14.66,
+        "p95": 21.51,
+        "p99": 31.92,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 15.69,
+        "p95": 25.79,
+        "p99": 47.79,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "encode": 0.01,
+        "graph": 4.65,
+        "total": 7.53
+      },
+      "eight_clients_server_total": 7.98
+    },
+    {
+      "endpoint": "graph: 2 hops (friends of friends, count)",
+      "one_client": {
+        "p50": 12.05,
+        "p95": 17.71,
+        "p99": 25.46,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 17.95,
+        "p95": 33.77,
+        "p99": 54.44,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "encode": 0.01,
+        "graph": 1.81,
+        "total": 4.77
+      },
+      "eight_clients_server_total": 9.69
+    },
+    {
+      "endpoint": "documents: sparse search, new question",
+      "one_client": {
+        "p50": 14.87,
+        "p95": 19.9,
+        "p99": 29.44,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 21.93,
+        "p95": 46.74,
+        "p99": 74.27,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "embed": 0.85,
+        "encode": 0.02,
+        "qdrant": 2.84,
+        "total": 7.4
+      },
+      "eight_clients_server_total": 13.9
+    },
+    {
+      "endpoint": "documents: dense search, new question",
+      "one_client": {
+        "p50": 24.36,
+        "p95": 36.1,
+        "p99": 55.68,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 62.74,
+        "p95": 182.07,
+        "p99": 869.69,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.07,
+        "embed": 11.57,
+        "encode": 0.02,
+        "qdrant": 2.63,
+        "total": 17.76
+      },
+      "eight_clients_server_total": 83.86
+    },
+    {
+      "endpoint": "documents: hybrid search, new question",
+      "one_client": {
+        "p50": 26.09,
+        "p95": 52.78,
+        "p99": 66.22,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 83.68,
+        "p95": 194.59,
+        "p99": 260.43,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "embed": 13.18,
+        "encode": 0.02,
+        "qdrant": 3.6,
+        "total": 20.16
+      },
+      "eight_clients_server_total": 79.42
+    },
+    {
+      "endpoint": "documents: hybrid + graph, new question",
+      "one_client": {
+        "p50": 44.58,
+        "p95": 71.05,
+        "p99": 113.87,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 124.99,
+        "p95": 265.44,
+        "p99": 337.25,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "embed": 12.52,
+        "encode": 0.03,
+        "graph": 24.27,
+        "qdrant": 7.75,
+        "total": 52.88
+      },
+      "eight_clients_server_total": 112.4
+    },
+    {
+      "endpoint": "documents: hybrid search, repeated question",
+      "one_client": {
+        "p50": 14.57,
+        "p95": 20.03,
+        "p99": 52.21,
+        "n": 200
+      },
+      "eight_clients": {
+        "p50": 20.92,
+        "p95": 31.68,
+        "p99": 38.0,
+        "n": 200
+      },
+      "server_timing": {
+        "auth": 0.08,
+        "embed": 0.01,
+        "encode": 0.02,
+        "qdrant": 3.33,
+        "total": 6.89
+      },
+      "eight_clients_server_total": 11.98
+    }
+  ]
+}

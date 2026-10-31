@@ -34,24 +34,56 @@ class BootstrapError(RuntimeError):
 # ------------------------------------------------------------------ pure renderers (unit-tested)
 
 
-def render_pg_conf(s: Settings) -> str:
+def memory_bytes() -> int:
+    """What this container may use: its cgroup limit when it has one, else the machine's memory."""
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if raw.isdigit() and int(raw) < 1 << 50:  # cgroup v1 writes a huge number for "no limit"
+            return int(raw)
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 2 << 30
+
+
+def pg_memory(mem: int) -> dict[str, str]:
+    """Postgres's memory in a container that also runs Qdrant, FalkorDB and swsdb: an eighth of it for Postgres's
+    own cache (128 MB to 8 GB), half as the planner's estimate of what the OS caches, and a sort memory per query
+    that 150 connections can't turn into more than about a quarter of it."""
+    mb = mem >> 20
+    return {"shared_buffers": f"{min(max(mb // 8, 128), 8192)}MB",
+            "effective_cache_size": f"{max(mb // 2, 256)}MB",
+            "work_mem": f"{min(max(mb // 600, 4), 64)}MB"}
+
+
+def render_pg_conf(s: Settings, mem: int | None = None) -> str:
     listen = "*" if s.expose_native or s.postgres_access else "127.0.0.1"
+    memory = pg_memory(mem if mem is not None else memory_bytes())
     return "\n".join([
         "# Written by swsdb on every start; change settings with ALTER SYSTEM or SWSDB_* variables.",
         f"listen_addresses = '{listen}'",
         "port = 5432",
         f"unix_socket_directories = '{s.pg_socket_dir}'",
         "max_connections = 150",
-        "shared_buffers = 128MB",
+        *(f"{k} = {v}" for k, v in memory.items()),
+        # short queries: the JIT compiler costs milliseconds and pays off only for long analytical ones; random
+        # reads on an SSD cost about what sequential ones do, so the planner should prefer indexes
+        "jit = off",
+        "random_page_cost = 1.1",
         "password_encryption = 'scram-sha-256'",
         "log_destination = 'stderr'",
         "logging_collector = off",
         "log_line_prefix = '[postgres] %m [%p] '",
         "log_timezone = 'UTC'",
         "timezone = 'UTC'",
-        # query statistics for the console (Logs > Database queries); AGE for the lite profile's graphs
-        "shared_preload_libraries = '" + ",".join(["pg_stat_statements", *(["age"] if s.in_postgres("graph")
-                                                    and "graph" in s.engines else [])]) + "'",
+        # query statistics for the console (Logs > Database queries); pg_prewarm saves which pages are cached and
+        # loads them again after a restart, so the first queries aren't cold; AGE for the lite profile's graphs
+        "shared_preload_libraries = '" + ",".join(["pg_stat_statements", "pg_prewarm",
+                                                   *(["age"] if s.in_postgres("graph")
+                                                     and "graph" in s.engines else [])]) + "'",
         "pg_stat_statements.track = top",
         "",
     ])

@@ -84,3 +84,16 @@ def test_graph_values_are_decoded_with_their_types():
     assert _typed([12, [b"1", b"2"]], schema) == [1.0, 2.0]
     with pytest.raises(_StaleSchema):  # a label created after the schema was read: re-read it
         _typed([8, [5, [7], []]], schema)
+
+
+def test_worker_processes_are_not_separate_servers_for_the_uploads_warning():
+    """SWSDB_WORKERS names its processes <server>/<pid>: they share one volume, so uploads on disk are fine; a second
+    server under another name is not."""
+    from swsdb_server.cluster import Cluster, volume
+
+    assert volume("box/123") == "box" and volume("box") == "box"
+    c = Cluster(None, name="box/1")
+    c.peers = [{"id": f"box/{i}", "version": "x", "files": "disk", "seen_s": 0.0} for i in (1, 2, 3)]
+    assert "warning" not in c.status()
+    c.peers.append({"id": "other", "version": "x", "files": "disk", "seen_s": 0.0})
+    assert "SWSDB_FILES=postgres" in c.status()["warning"]

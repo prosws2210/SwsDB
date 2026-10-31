@@ -46,6 +46,11 @@ def server_id(configured: str | None = None) -> str:
     return (configured or os.environ.get("SWSDB_SERVER_ID") or socket.gethostname() or "swsdb")[:100]
 
 
+def volume(server: str) -> str:
+    """The server whose data volume a server (or one of its worker processes, `<server>/<pid>`) uses."""
+    return server.split("/", 1)[0]
+
+
 class Cluster:
     def __init__(self, sql: SqlStore | None, *, files: str = "disk", profile: str = "default", fence_size: int = 8,
                  name: str | None = None):
@@ -87,7 +92,8 @@ class Cluster:
                 await self.sql.execute("DELETE FROM swsdb.servers WHERE id = %s", [self.id])
 
     def status(self) -> dict:
-        others = [p for p in self.peers if p["id"] != self.id]
+        # worker processes of one server are named <server>/<pid> (SWSDB_WORKERS): they share its volume
+        others = [p for p in self.peers if volume(p["id"]) != volume(self.id)]
         out = {"server": self.id, "leader": self.leader, "files": self.files,
                "servers": [{k: p[k] for k in ("id", "version", "files", "seen_s")} for p in self.peers]}
         if others and any(p["files"] != "postgres" for p in self.peers):

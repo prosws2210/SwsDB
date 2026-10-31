@@ -8,8 +8,6 @@ import os
 import time
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 log = logging.getLogger("swsdb.observe")
 
@@ -130,27 +128,40 @@ class RequestLog:
 REQUESTS = RequestLog()
 
 
-class HttpMetrics(BaseHTTPMiddleware):
-    """Requests by route template (not raw path, so ids don't explode the series count), and a trace span each."""
+class HttpMetrics:
+    """Requests by route template (not raw path, so ids don't explode the series count), and a trace span each.
+    Pure ASGI middleware: no extra task or stream wrapping per request (Starlette's BaseHTTPMiddleware adds both)."""
 
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
         t0 = time.perf_counter()
-        status = 500
-        with span(f"{request.method} {request.url.path}"):
+        status = [500]
+
+        async def send_status(message):
+            if message["type"] == "http.response.start":
+                status[0] = message["status"]
+            await send(message)
+
+        method = scope["method"]
+        with span(f"{method} {scope['path']}"):
             try:
-                response = await call_next(request)
-                status = response.status_code
-                return response
+                await self.app(scope, receive, send_status)
             finally:
-                route = getattr(request.scope.get("route"), "path", None) or "unmatched"
+                route = getattr(scope.get("route"), "path", None) or "unmatched"
                 took = time.perf_counter() - t0
                 if route != "/metrics":
-                    HTTP_REQUESTS.labels(request.method, route, str(status)).inc()
-                    HTTP_SECONDS.labels(request.method, route).observe(took)
+                    HTTP_REQUESTS.labels(method, route, str(status[0])).inc()
+                    HTTP_SECONDS.labels(method, route).observe(took)
                 if route.startswith(("/v1/", "/mcp")) and route != "/v1/logs":
-                    c = getattr(request.state, "caller", None)
-                    REQUESTS.add(request.method, route, status, took * 1000,
-                                 getattr(request.state, "tenant", None) or (c.tenant if c else None),
+                    state = scope.get("state") or {}
+                    c = state.get("caller")
+                    REQUESTS.add(method, route, status[0], took * 1000,
+                                 state.get("tenant") or (c.tenant if c else None),
                                  c.role if c else None, c.key_id if c else None)
 
 

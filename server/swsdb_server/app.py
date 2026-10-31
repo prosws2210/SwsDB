@@ -17,7 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import DATA_FORMAT, __version__, mcp_http, observe
+from . import DATA_FORMAT, __version__, mcp_http, observe, timing
 from .answer import Answerer
 from .api_v1 import router as v1_router
 from .auth import Caller, KeyStore
@@ -64,7 +64,7 @@ async def _start_documents(app: FastAPI) -> None:
         await asyncio.sleep(0.5)
     embedder = Embedder(s.embeddings, s.embeddings_model, s.embeddings_url,
                         s.embeddings_api_key.get_secret_value() if s.embeddings_api_key else None,
-                        cache_dir=str(s.models_dir))
+                        cache_dir=str(s.models_dir), query_cache=s.embed_cache, threads=s.model_threads)
     extractor = None
     if "graph" in s.engines and s.entities != "off":
         if s.llm_model and s.entities in ("auto", "llm"):
@@ -122,6 +122,10 @@ async def _on_cluster_event(app: FastAPI, event: dict) -> None:
         app.state.endusers.forget()
     if kind in ("graphs", "reset") and app.state.graph is not None:
         app.state.graph.forget()
+    if kind == "catalog" and app.state.docs is not None:
+        app.state.docs.forget(event.get("tenant"), event.get("name"))
+    if kind == "reset" and app.state.docs is not None:
+        app.state.docs.forget()
     if kind == "reset" and app.state.sql is not None:
         app.state.sql.forget()  # tenant roles and their passwords may have changed with a restore
         await app.state.sql.drop_connections()
@@ -265,7 +269,8 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     async def caller(request: Request) -> Caller:
         """Who is calling. Keys from the environment reach every tenant; managed keys reach one. With no keys at all
         (none in the environment and no managed ones), every caller is a global admin, for local use."""
-        c = await _resolve(request)
+        with timing.stage("auth"):
+            c = await _resolve(request)
         request.state.caller = c  # for the request log
         return c
 
@@ -364,48 +369,68 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
         except ValueError:
             return False
 
-    @app.middleware("http")
-    async def same_origin(request: Request, call_next):
+    console_security = [
+        # the console only talks to this server; nothing inline, nothing from elsewhere
+        (b"content-security-policy", b"default-src 'self'; img-src 'self' data:; style-src 'self'; "
+                                     b"script-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+                                     b"base-uri 'none'; form-action 'none'"),
+        (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"),
+        # revalidate every time (a cheap 304 when unchanged), so an upgraded server never runs yesterday's console
+        (b"cache-control", b"no-cache")]
+
+    def refusal(scope) -> JSONResponse | None:
         """Browsers: only swsdb's own pages may call it (no cross-site requests, so no CSRF). And while the API is open
         (no keys), only names that can't be a DNS-rebinding trick: localhost, IP addresses, this container's hostname
-        and SWSDB_ALLOWED_HOSTS. A web page you visit can't reach a local swsdb through its own domain."""
-        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").lower()
-        origin = request.headers.get("origin")
+        and SWSDB_ALLOWED_HOSTS. A web page you visit can't reach a local swsdb through its own domain. While a
+        snapshot is restored the data is being replaced: only status and the snapshot list answer."""
+        headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}
+        host = (headers.get("x-forwarded-host") or headers.get("host") or "").lower()
+        origin = headers.get("origin")
         if origin is not None:
             o = urlsplit(origin).netloc.lower() if origin != "null" else "null"
             if o != host and o.rsplit(":", 1)[0] not in s.allowed_hosts_list:
                 return _error(403, "cross-origin requests are refused: swsdb serves its own console; call the API "
                                    "from your backend, or list the site in SWSDB_ALLOWED_HOSTS")
-        if s.api_key is None and s.read_only_api_key is None and not request.app.state.keys.has_any_cached():
+        if s.api_key is None and s.read_only_api_key is None and not app.state.keys.has_any_cached():
             if host and not _known_host(host):
                 return _error(403, f"host {host!r} is refused while swsdb has no API key (a web page could otherwise "
                                    "reach it through DNS rebinding): set SWSDB_API_KEY, or add the name to "
                                    "SWSDB_ALLOWED_HOSTS")
-        return await call_next(request)
-
-    @app.middleware("http")
-    async def restoring(request: Request, call_next):
-        """While a snapshot is restored the data is being replaced: only status and the snapshot list answer."""
-        if request.app.state.maintenance == "restore" and request.url.path.startswith(("/v1/", "/qdrant")) and not (
-                request.url.path == "/v1/status" or (request.method == "GET"
-                                                     and request.url.path.startswith("/v1/admin/snapshots"))):
+        path = scope["path"]
+        if app.state.maintenance == "restore" and path.startswith(("/v1/", "/qdrant")) and not (
+                path == "/v1/status" or (scope["method"] == "GET" and path.startswith("/v1/admin/snapshots"))):
             r = _error(503, "swsdb is restoring a snapshot; try again in a moment")
             r.headers["Retry-After"] = "5"
             return r
-        return await call_next(request)
+        return None
 
-    @app.middleware("http")
-    async def console_headers(request: Request, call_next):
-        response = await call_next(request)
-        if request.url.path.startswith("/console"):
-            # the console only talks to this server; nothing inline, nothing from elsewhere
-            response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-            response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["Referrer-Policy"] = "no-referrer"
-            # revalidate every time (a cheap 304 when unchanged), so an upgraded server never runs yesterday's console
-            response.headers["Cache-Control"] = "no-cache"
-        return response
+    class RequestGate:
+        """Pure ASGI middleware for the checks above and the console's security headers."""
 
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.inner(scope, receive, send)
+                return
+            refused = refusal(scope)
+            if refused is not None:
+                await refused(scope, receive, send)
+                return
+            if not scope["path"].startswith("/console"):
+                await self.inner(scope, receive, send)
+                return
+
+            async def send_secured(message):
+                if message["type"] == "http.response.start":
+                    kept = [(k, v) for k, v in message.get("headers", []) if k.lower() not in
+                            {name for name, _ in console_security}]
+                    message["headers"] = kept + console_security
+                await send(message)
+            await self.inner(scope, receive, send_secured)
+
+    app.add_middleware(RequestGate)
+
+    app.add_middleware(timing.ServerTiming, enabled=s.timing)  # outermost: it times everything
     return app

@@ -75,6 +75,10 @@ class Documents:
                  embedder: Embedder, extractor: Extractor | NameExtractor | None):
         self.s, self.sql, self.vector, self.graph = s, sql, vector, graph
         self.embedder, self.extractor = embedder, extractor
+        # the catalog of documents collections, per (tenant, name): read on almost every request, changed rarely.
+        # Creating or dropping a collection clears it here and, through a cluster event, on every other server;
+        # the expiry is a safety net for an event that never arrives
+        self._catalog: dict[tuple[str, str], tuple[float, dict | None]] = {}
         self.cluster = Cluster(None, files=s.files, profile=s.profile)  # the app gives it the shared one
         from .sync import Sync
         self.sync = Sync(self)
@@ -108,15 +112,40 @@ class Documents:
         except FileNotFoundError:
             return None
 
-    async def collection(self, tenant: str, name: str) -> dict:
+    CATALOG_TTL_S = 30.0
+
+    def forget(self, tenant: str | None = None, name: str | None = None) -> None:
+        if tenant is None:
+            self._catalog.clear()
+        else:
+            self._catalog.pop((tenant, name), None)
+
+    async def _catalog_row(self, tenant: str, name: str) -> dict | None:
+        """The collection's catalog row (None: not a documents collection), from memory when it's fresh."""
+        hit = self._catalog.get((tenant, name))
+        now = time.monotonic()
+        if hit is not None and hit[0] > now:
+            return hit[1]
         row = await self.one("SELECT * FROM swsdb.collections WHERE tenant = %s AND name = %s", [tenant, name])
+        if len(self._catalog) > 10_000:  # bounded: forget everything rather than grow without limit
+            self._catalog.clear()
+        self._catalog[(tenant, name)] = (now + self.CATALOG_TTL_S, row)
+        return row
+
+    async def _catalog_changed(self, tenant: str, name: str) -> None:
+        self.forget(tenant, name)
+        cluster = getattr(self, "cluster", None)
+        if cluster is not None:
+            await cluster.notify("catalog", tenant=tenant, name=name)
+
+    async def collection(self, tenant: str, name: str) -> dict:
+        row = await self._catalog_row(tenant, name)
         if row is None:
             raise NotFound(f"collection {name!r} is not a document collection (create it with \"documents\": true)")
         return row
 
     async def is_document_collection(self, tenant: str, name: str) -> bool:
-        return bool(await self.one("SELECT 1 FROM swsdb.collections WHERE tenant = %s AND name = %s",
-                                   [tenant, name]))
+        return await self._catalog_row(tenant, name) is not None
 
     async def ensure_graph_indexes(self, key: str) -> None:
         for label, prop in GRAPH_INDEXES:
@@ -133,11 +162,13 @@ class Documents:
             await self.ensure_graph_indexes(key)
         await self.rows("INSERT INTO swsdb.collections (tenant, name, embedding, dim, graph) VALUES (%s,%s,%s,%s,%s)",
                         [tenant, name, self.embedder.name, dim, with_graph])
+        await self._catalog_changed(tenant, name)
         return {"embedding": self.embedder.name, "dim": dim, "graph": with_graph}
 
     async def drop_collection(self, tenant: str, name: str) -> bool:
         rows = await self.rows("DELETE FROM swsdb.collections WHERE tenant = %s AND name = %s RETURNING name",
                                [tenant, name])
+        await self._catalog_changed(tenant, name)
         shutil.rmtree(self.s.files_dir / tenant / name, ignore_errors=True)
         return bool(rows)
 
@@ -331,8 +362,11 @@ class Documents:
         rerank = self.s.rerank if rerank is None else rerank
         fetch = max(k * 4, 20) if rerank else k * 2  # head-room for the catalog check, and candidates to re-rank
         pre = max(fetch * 2, 20)
-        dense_q = (await self.embedder.dense([text], query=True))[0] if mode in ("hybrid", "dense") else None
+        # the two encodings run at the same time (BM25 doesn't wait for the neural model)
+        dense_t = (asyncio.ensure_future(self.embedder.dense([text], query=True))
+                   if mode in ("hybrid", "dense") else None)
         sparse_q = (await self.embedder.sparse([text], query=True))[0] if mode in ("hybrid", "sparse") else None
+        dense_q = (await dense_t)[0] if dense_t is not None else None
         sp = {"indices": sparse_q.indices, "values": sparse_q.values} if sparse_q else None
         if mode == "sparse" and not sp["indices"]:
             return {"hits": [], "graph": {"used": False}}
@@ -411,14 +445,15 @@ class Documents:
 
         for src, dst in await q("MATCH (c:Chunk)-[:NEXT]-(n:Chunk) WHERE c.id IN $ids RETURN c.id, n.id"):
             offer(src, dst, "next", ["adjacent passage"])
-        # one row per shared entity (FalkorDB's verbose replies turn lists into text, so aggregate here)
-        shared: dict[tuple[str, str], list[str]] = {}
-        for src, dst, name in await q("MATCH (c:Chunk)-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(n:Chunk) "
-                                      "WHERE c.id IN $ids AND n.id <> c.id RETURN DISTINCT c.id, n.id, e.name "
-                                      "LIMIT 2000"):
-            shared.setdefault((src, dst), []).append(name)
-        for (src, dst), names in shared.items():
-            offer(src, dst, "entity", [f"mentions {', '.join(sorted(names)[:3])}"], len(names))
+        # one row per (passage, neighbouring passage), with the entities they share, best first: the graph engine
+        # groups and ranks, so an entity many passages mention (a hub) can't flood the reply with rows only to be
+        # thrown away here (only the best 100 candidates are kept below)
+        for src, dst, names in await q("MATCH (c:Chunk)-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(n:Chunk) "
+                                       "WHERE c.id IN $ids AND n.id <> c.id "
+                                       "WITH c.id AS src, n.id AS dst, collect(DISTINCT e.name) AS names "
+                                       "RETURN src, dst, names ORDER BY size(names) DESC LIMIT 300"):
+            shared = names if isinstance(names, list) else [names]
+            offer(src, dst, "entity", [f"mentions {', '.join(sorted(shared)[:3])}"], len(shared))
         if hops >= 2:
             for src, dst, a, typ, b in await q("MATCH (c:Chunk)-[:MENTIONS]->(a:Entity)-[rel:RELATED]-(b:Entity)"
                                                "<-[:MENTIONS]-(n:Chunk) WHERE c.id IN $ids AND n.id <> c.id "

@@ -10,6 +10,7 @@ from swsdb_server.bootstrap import (
     check_layout,
     check_pg_major,
     new_secrets,
+    pg_memory,
     render_pg_conf,
     render_pg_hba,
     render_qdrant_config,
@@ -50,6 +51,18 @@ def test_engines_listen_on_localhost_unless_exposed():
     assert json.loads(render_qdrant_config(local, secret))["service"]["host"] == "127.0.0.1"
     assert json.loads(render_qdrant_config(exposed, secret))["service"]["host"] == "0.0.0.0"
     assert "bind 127.0.0.1 -::1" in render_redis_conf(local, secret)
+
+
+def test_postgres_memory_follows_the_container():
+    """An eighth of the container's memory for Postgres's cache, within 128 MB and 8 GB; prewarm and the planner
+    settings for short queries always on."""
+    gb = 1 << 30
+    assert pg_memory(1 * gb)["shared_buffers"] == "128MB"
+    assert pg_memory(8 * gb) == {"shared_buffers": "1024MB", "effective_cache_size": "4096MB", "work_mem": "13MB"}
+    assert pg_memory(256 * gb)["shared_buffers"] == "8192MB" and pg_memory(256 * gb)["work_mem"] == "64MB"
+    conf = render_pg_conf(s(), mem=8 * gb)
+    assert "shared_buffers = 1024MB" in conf and "jit = off" in conf and "random_page_cost = 1.1" in conf
+    assert "pg_prewarm" in next(ln for ln in conf.splitlines() if ln.startswith("shared_preload_libraries"))
 
 
 def test_project_connections_let_in_only_project_logins():

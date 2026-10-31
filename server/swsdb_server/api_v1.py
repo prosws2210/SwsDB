@@ -8,13 +8,15 @@ import time
 from typing import Any, Literal
 from urllib.parse import quote
 
+import orjson
 import psycopg
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from . import answer as answer_mod
-from . import graph_views, observe, vector_views
+from . import graph_views, observe, timing, vector_views
 from .advisors import run_advisors
 from .auth import Caller
 from .dataapi import query_stats, roles_of
@@ -64,6 +66,18 @@ class FailedSignIns:
 
 
 SIGNIN_FAILS = FailedSignIns()
+
+
+def _json_default(o: Any) -> Any:
+    return jsonable_encoder(o)  # what orjson doesn't know natively (Decimal, sets, Pydantic models...)
+
+
+def fast(obj: Any) -> Response:
+    """A JSON response encoded by orjson, skipping FastAPI's generic conversion of the whole result first: the hot
+    endpoints (search, SQL, vector and graph reads) return large lists of plain values."""
+    with timing.stage("encode"):
+        body = orjson.dumps(obj, default=_json_default, option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY)
+    return Response(body, media_type="application/json")
 
 
 async def json_body(request: Request, default: Any = None) -> Any:
@@ -524,7 +538,7 @@ def router(caller) -> APIRouter:
     async def get_points(body: Ids, name: str = Depends(collection_name), t: str = Depends(tenant),
                          e: Engines = Depends(), role: str = Depends(require_key)):
         await documents_guard(t, name, e, role, "reading raw points")
-        return {"points": await e.vector.get(engine_name(t, name), body.ids)}
+        return fast({"points": await e.vector.get(engine_name(t, name), body.ids)})
 
     @r.post("/collections/{name}/points/delete", tags=["vectors"])
     async def delete_points(body: Ids, name: str = Depends(collection_name), t: str = Depends(tenant),
@@ -537,14 +551,15 @@ def router(caller) -> APIRouter:
                             e: Engines = Depends(), role: str = Depends(require_key)):
         """Page through a collection's points in id order (the console's vector browser)."""
         await documents_guard(t, name, e, role, "browsing raw points")
-        return await e.vector.browse(engine_name(t, name), body.limit, body.offset, body.where, body.with_vector)
+        return fast(await e.vector.browse(engine_name(t, name), body.limit, body.offset, body.where,
+                                          body.with_vector))
 
     @r.post("/collections/{name}/search", tags=["vectors"])
     async def search(body: Search, name: str = Depends(collection_name), t: str = Depends(tenant),
                      e: Engines = Depends(), role: str = Depends(require_key)):
         await documents_guard(t, name, e, role, "raw vector search")
         hits = await e.vector.search(engine_name(t, name), body.vector, body.limit, body.where, body.with_payload)
-        return {"hits": hits}
+        return fast({"hits": hits})
 
     # -------------------------------------------------------------- a closer look (the console's vector views)
 
@@ -582,7 +597,7 @@ def router(caller) -> APIRouter:
         await documents_guard(t, name, e, role, "raw vector search")
         hits = await vector_views.similar(e.vector, engine_name(t, name), like=body.like, vector=body.vector,
                                           using=body.using, limit=body.limit, where=body.where)
-        return {"hits": hits}
+        return fast({"hits": hits})
 
     @r.post("/collections/{name}/recall", tags=["vectors"])
     async def index_recall(body: Recall, name: str = Depends(collection_name), t: str = Depends(tenant),
@@ -631,7 +646,7 @@ def router(caller) -> APIRouter:
             raise NotFound(f"collection {name!r} has no graph (create it with graph: true)")
         await documents_guard(t, name, e, role, "Cypher")
         if body.read_only:
-            return await g.query(key, body.query, body.params, read_only=True, timeout_s=body.timeout_s)
+            return fast(await g.query(key, body.query, body.params, read_only=True, timeout_s=body.timeout_s))
         not_in_maintenance(request)
         async with request.app.state.cluster.changing(wait=False):
             return await g.query(key, body.query, body.params, read_only=False, timeout_s=body.timeout_s)
@@ -734,9 +749,9 @@ def router(caller) -> APIRouter:
         if body.graph_hops and not e.has("graph"):
             raise HTTPException(409, "graph_hops needs the graph engine")
         e.need("vector")
-        return await e.docs.query(t, name, body.query, k=body.k, mode=body.mode, where=body.where,
-                                  principals=body.principals, role=role, graph_hops=body.graph_hops,
-                                  graph_k=body.graph_k, rerank=body.rerank)
+        return fast(await e.docs.query(t, name, body.query, k=body.k, mode=body.mode, where=body.where,
+                                       principals=body.principals, role=role, graph_hops=body.graph_hops,
+                                       graph_k=body.graph_k, rerank=body.rerank))
 
     @r.post("/collections/{name}/answer", tags=["documents"])
     async def answer(body: Ask, request: Request, name: str = Depends(collection_name), t: str = Depends(tenant),
@@ -858,8 +873,8 @@ def router(caller) -> APIRouter:
         `public`)."""
         if role != "admin" and not body.read_only:
             raise HTTPException(403, "the read-only key can only run read_only queries")
-        return await e.sql.query(body.query, body.params, read_only=body.read_only, timeout_s=body.timeout_s,
-                                 max_rows=body.max_rows, tenant=t)
+        return fast(await e.sql.query(body.query, body.params, read_only=body.read_only,
+                                      timeout_s=body.timeout_s, max_rows=body.max_rows, tenant=t))
 
     # -------------------------------------------------------------- snapshots
 
@@ -1128,7 +1143,7 @@ def router(caller) -> APIRouter:
     async def rest_select(table: str, request: Request, t: str = Depends(tenant), c: Caller = Depends(member)):
         """Rows of a table: ?select=a,b&col=eq.value&order=col.desc&limit=100&offset=0&count=exact. Keys see every
         row; a signed-in user sees the rows the table's policies allow (and only tables exposed to users)."""
-        return await data(request).select(t, c, table, dict(request.query_params))
+        return fast(await data(request).select(t, c, table, dict(request.query_params)))
 
     @r.post("/rest/{table}", tags=["data api"], status_code=201)
     async def rest_insert(table: str, request: Request, t: str = Depends(tenant), c: Caller = Depends(member)):
@@ -1150,7 +1165,7 @@ def router(caller) -> APIRouter:
         """Call one of the tenant's SQL functions with named arguments ({"arg": value}). A signed-in user may call
         only functions exposed to users."""
         body = await json_body(request, default={})
-        return await data(request).rpc(t, c, function, body)
+        return fast(await data(request).rpc(t, c, function, body))
 
     @r.get("/policies", tags=["data api"])
     async def policies(request: Request, t: str = Depends(tenant), _: str = Depends(admin)):

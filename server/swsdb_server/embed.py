@@ -10,9 +10,12 @@ import asyncio
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import httpx
+
+from . import timing
 
 log = logging.getLogger("swsdb.embed")
 
@@ -36,13 +39,15 @@ class Embedder:
     """`provider` is "local" or an OpenAI-compatible base URL's provider label; `model` names the dense model."""
 
     def __init__(self, provider: str = "local", model: str | None = None, url: str | None = None,
-                 api_key: str | None = None, cache_dir: str | None = None, batch: int = 32):
+                 api_key: str | None = None, cache_dir: str | None = None, batch: int = 32,
+                 query_cache: int = 10_000, threads: int | None = None):
         self.provider = provider
         self.model = model or (LOCAL_DENSE if provider == "local" else "text-embedding-3-small")
         self.url = (url or "https://api.openai.com/v1").rstrip("/")
         self.api_key = api_key
         self.cache_dir = cache_dir
         self.batch = batch
+        self.threads = threads  # the model's CPU threads (None: every core)
         self._dense = None
         self._sparse = None
         self._reranker = None
@@ -52,6 +57,23 @@ class Embedder:
         self._queries_waiting = 0  # documents give way to queries between their small batches
         self._count = threading.Lock()
         self._http = httpx.AsyncClient(timeout=120) if provider != "local" else None
+        # questions' vectors, most recently used last: a question's vector never changes for a model, so a repeated
+        # question skips the model entirely. Bounded (10,000 questions is ~15 MB); documents never go through it
+        self._qcache: OrderedDict[tuple[str, str], object] = OrderedDict()
+        self._qcache_max = query_cache
+
+    def _cached(self, kind: str, text: str):
+        hit = self._qcache.get((kind, text))
+        if hit is not None:
+            self._qcache.move_to_end((kind, text))
+        return hit
+
+    def _remember(self, kind: str, text: str, value) -> None:
+        if self._qcache_max <= 0:
+            return
+        self._qcache[(kind, text)] = value
+        if len(self._qcache) > self._qcache_max:
+            self._qcache.popitem(last=False)
 
     @property
     def name(self) -> str:
@@ -63,20 +85,20 @@ class Embedder:
         if self._dense is None:
             from fastembed import TextEmbedding
             log.info("loading embedding model %s", self.model)
-            self._dense = TextEmbedding(self.model, cache_dir=self.cache_dir)
+            self._dense = TextEmbedding(self.model, cache_dir=self.cache_dir, threads=self.threads)
         return self._dense
 
     def _load_reranker(self):
         if self._reranker is None:
             from fastembed.rerank.cross_encoder import TextCrossEncoder
             log.info("loading re-ranking model %s", self.rerank_model)
-            self._reranker = TextCrossEncoder(self.rerank_model, cache_dir=self.cache_dir)
+            self._reranker = TextCrossEncoder(self.rerank_model, cache_dir=self.cache_dir, threads=self.threads)
         return self._reranker
 
     def _load_sparse(self):
         if self._sparse is None:
             from fastembed import SparseTextEmbedding
-            self._sparse = SparseTextEmbedding(LOCAL_SPARSE, cache_dir=self.cache_dir)
+            self._sparse = SparseTextEmbedding(LOCAL_SPARSE, cache_dir=self.cache_dir, threads=self.threads)
         return self._sparse
 
     DOC_BATCH = 8  # documents are embedded a few passages at a time, so a search never waits long behind them
@@ -115,11 +137,23 @@ class Embedder:
         return self._run(self._dense_batch, texts, query)
 
     def _local_sparse(self, texts: list[str], query: bool) -> list[Sparse]:
+        if query:  # BM25 is tokenizing and counting, not the neural model: a question needn't wait for the lock
+            return self._sparse_batch(texts, True)
         return self._run(self._sparse_batch, texts, query)
 
+    @timing.timed("embed")
     async def dense(self, texts: list[str], query: bool = False) -> list[list[float]]:
         if not texts:
             return []
+        if query and len(texts) == 1:
+            if (hit := self._cached("dense", texts[0])) is not None:
+                return [hit]
+            out = await self._embed_dense(texts, query)
+            self._remember("dense", texts[0], out[0])
+            return out
+        return await self._embed_dense(texts, query)
+
+    async def _embed_dense(self, texts: list[str], query: bool) -> list[list[float]]:
         if self.provider == "local":
             return await asyncio.to_thread(self._local_dense, texts, query)
         out: list[list[float]] = []
@@ -137,6 +171,7 @@ class Embedder:
         self._dim = len(out[0])
         return out
 
+    @timing.timed("embed")
     async def rerank(self, query: str, texts: list[str]) -> list[float]:
         """Cross-encoder relevance of each text to the query (a logit: higher is more relevant). Runs with a search's
         priority, so document embedding gives way to it."""
@@ -147,9 +182,16 @@ class Embedder:
             return [float(s) for s in self._load_reranker().rerank(query, batch, batch_size=32)]
         return await asyncio.to_thread(self._run, score, texts, True)
 
+    @timing.timed("embed")
     async def sparse(self, texts: list[str], query: bool = False) -> list[Sparse]:
         if not texts:
             return []
+        if query and len(texts) == 1:
+            if (hit := self._cached("sparse", texts[0])) is not None:
+                return [hit]
+            out = await asyncio.to_thread(self._local_sparse, texts, query)
+            self._remember("sparse", texts[0], out[0])
+            return out
         return await asyncio.to_thread(self._local_sparse, texts, query)
 
     async def dim(self) -> int:

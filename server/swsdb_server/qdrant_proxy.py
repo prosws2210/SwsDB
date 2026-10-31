@@ -24,6 +24,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import Response
 
+from . import timing
 from .auth import Caller
 from .names import DEFAULT_TENANT, NameError_, check, engine_name, parse_engine_name
 
@@ -102,9 +103,10 @@ def router(caller) -> APIRouter:
 
     async def forward(request: Request, v, method: str, path: str, body: bytes | None, prefix: str | None) -> Response:
         try:
-            resp = await v.http.request(method, path, params=list(request.query_params.multi_items()),
-                                        content=body, timeout=60.0,
-                                        headers={"content-type": "application/json"} if body else None)
+            with timing.stage("qdrant"):
+                resp = await v.http.request(method, path, params=list(request.query_params.multi_items()),
+                                            content=body, timeout=60.0,
+                                            headers={"content-type": "application/json"} if body else None)
         except httpx.HTTPError as e:
             raise HTTPException(503, f"Qdrant: {type(e).__name__}") from None
         content = resp.content

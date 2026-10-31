@@ -22,6 +22,7 @@ from psycopg import sql as pgsql
 from psycopg.rows import dict_row
 from psycopg_pool import PoolTimeout
 
+from . import timing
 from .names import parse_engine_name, point_id
 from .stores import (
     DISTANCES,
@@ -161,6 +162,7 @@ class PgVectorStore:
     async def close(self) -> None:
         pass
 
+    @timing.timed("pgvector")
     async def _rows(self, statement: str | pgsql.Composable, params: Any = None) -> list[dict]:
         await self.sql.migrate()
         try:
@@ -770,6 +772,7 @@ class AgeGraphStore:
     async def count_nodes(self, name: str) -> int:
         return (await self.query(name, "MATCH (n) RETURN count(n)", None, read_only=True, timeout_s=10))["rows"][0][0]
 
+    @timing.timed("graph")
     async def query(self, name: str, query: str, params: dict | None, *, read_only: bool, timeout_s: float) -> dict:
         graph = await self._graph(name)
         if graph is None:

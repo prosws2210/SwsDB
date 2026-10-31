@@ -99,9 +99,20 @@ class Settings(BaseSettings):
     read_only_api_key: SecretStr | None = None
     host: str = "0.0.0.0"
     port: int = 6464
+    # server processes on the port. Python runs one request at a time per process, so one worker tops out around
+    # 300 requests a second; each worker is one more server of the cluster (ADR 0006) and loads its own embedding
+    # model (~300 MB)
+    workers: int = Field(1, ge=1, le=64)
+    # the embedding model's CPU threads per worker. Default: the cores shared out between the workers, so several
+    # workers' models don't fight over every core (with one worker: every core)
+    embed_threads: int | None = Field(None, ge=1, le=256)
     data_dir: Path = Path("/swsdb/data")
     run_dir: Path = Path("/run/swsdb")
     expose_native: bool = False
+    # a Server-Timing header on every response: where the request's time went (auth, postgres, qdrant, embed...)
+    timing: bool = True
+    # questions' vectors kept in memory (a repeated question skips the embedding model); 0 turns it off
+    embed_cache: int = Field(10_000, ge=0, le=1_000_000)
     # project connections: Postgres accepts logins from the network, but only for the per-project roles swsdb issues
     # (POST /v1/postgres/credentials), into the project's own schema. The port still has to be published (-p 5432:5432)
     postgres_access: bool = True
@@ -198,6 +209,12 @@ class Settings(BaseSettings):
         if v not in {"local", "openai"}:
             raise ValueError("SWSDB_EMBEDDINGS must be 'local' or 'openai' (any OpenAI-compatible endpoint)")
         return v
+
+    @property
+    def model_threads(self) -> int | None:
+        if self.embed_threads:
+            return self.embed_threads
+        return None if self.workers == 1 else max(1, (os.cpu_count() or 1) // self.workers)
 
     @property
     def files_dir(self) -> Path:
