@@ -32,6 +32,7 @@ from .health import Monitor, qdrant_key, qdrant_url, read_secrets
 from .lite import AgeGraphStore, PgVectorStore
 from .names import NameError_
 from .neo4j import Neo4jGraphStore
+from .qdrant_proxy import router as qdrant_router
 from .settings import Settings
 from .snapshot import Snapshots
 from .storage import Storage
@@ -345,6 +346,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
         return RedirectResponse("/console/")
 
     app.include_router(v1_router(caller))
+    app.include_router(qdrant_router(caller))
     app.state.mcp_servers, mcp_routes = mcp_http.servers(s, caller)
     app.router.routes.extend(mcp_routes)
     app.mount("/console", StaticFiles(directory=CONSOLE_DIR, html=True), name="console")
@@ -384,7 +386,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     @app.middleware("http")
     async def restoring(request: Request, call_next):
         """While a snapshot is restored the data is being replaced: only status and the snapshot list answer."""
-        if request.app.state.maintenance == "restore" and request.url.path.startswith("/v1/") and not (
+        if request.app.state.maintenance == "restore" and request.url.path.startswith(("/v1/", "/qdrant")) and not (
                 request.url.path == "/v1/status" or (request.method == "GET"
                                                      and request.url.path.startswith("/v1/admin/snapshots"))):
             r = _error(503, "swsdb is restoring a snapshot; try again in a moment")

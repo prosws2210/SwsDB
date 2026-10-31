@@ -353,6 +353,7 @@ class Snapshots:
                     r=pgsql.Identifier(role)))
         await sql.migrate()  # a snapshot from an older swsdb is brought up to this version's schema
         await sql.sync_role_passwords()
+        await sql.restore_logins()  # projects' connection strings keep working, on this server or a new one
 
     async def _restore_vectors(self, folder: Path, names: list[str]) -> None:
         v = self.app.state.vector

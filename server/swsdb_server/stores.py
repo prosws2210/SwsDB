@@ -4,9 +4,11 @@ be swapped (or moved out of the container) without touching the API."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime as dt
 import decimal
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -213,6 +215,18 @@ MIGRATIONS: list[str] = [
     GRANT USAGE ON SCHEMA swsdb_auth TO PUBLIC;
     GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA swsdb_auth TO PUBLIC;
     """,
+    # 12: per-project Postgres logins (connection strings for SQLAlchemy, Prisma, Django...). pg_hba lets members of
+    # swsdb_projects in from the network; the role itself holds nothing. The SCRAM verifier (never the password) is
+    # kept so a snapshot restored onto another server brings the logins back
+    """
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swsdb_projects') THEN
+        CREATE ROLE swsdb_projects NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+      END IF;
+    END $$;
+    CREATE TABLE swsdb.project_logins (
+      tenant text PRIMARY KEY, role text NOT NULL, verifier text, issued_at timestamptz NOT NULL DEFAULT now());
+    """,
 ]
 
 TENANT_ROLE_PREFIX = "swsdb_t_"  # bootstrap's pg_ident map lets the server log in as any role with this prefix
@@ -225,6 +239,26 @@ def users_role(tenant: str) -> str:
     if len(name) > 63:
         name = f"{TENANT_ROLE_PREFIX}{hashlib.sha256(tenant.encode()).hexdigest()[:40]}__u"
     return name
+
+
+def connect_role(tenant: str) -> str:
+    """The login a project's own code connects as (a connection string): it starts every session as the tenant's role,
+    so whatever it creates belongs to the tenant, and it can't do anything as itself."""
+    name = f"{TENANT_ROLE_PREFIX}{tenant}__c"
+    if len(name) > 63:
+        name = f"{TENANT_ROLE_PREFIX}{hashlib.sha256(tenant.encode()).hexdigest()[:40]}__c"
+    return name
+
+
+def scram_verifier(password: str, iterations: int = 4096) -> str:
+    """The SCRAM-SHA-256 verifier Postgres stores for a password, computed here so the password itself never reaches
+    the server (nor its statement statistics or logs)."""
+    salt = secrets.token_bytes(16)
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+    server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+    b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
+    return f"SCRAM-SHA-256${iterations}:{b64(salt)}${b64(hashlib.sha256(client_key).digest())}:{b64(server_key)}"
 
 
 def tenant_role(tenant: str) -> str:
@@ -429,6 +463,91 @@ class SqlStore:
                                "ON CONFLICT (tenant) DO NOTHING", [f"{tenant}__u", role])
         self._roles[f"{tenant}__u"] = role
         return role
+
+    async def issue_login(self, tenant: str) -> dict:
+        """A new password for the project's connection login (created on first use). Sessions already open keep
+        running; the old password stops working for new ones."""
+        owner = await self.tenant_role(tenant)
+        password = secrets.token_urlsafe(24)
+        async with self.pool.connection() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(7367736463)")
+            role = await self._apply_login(conn, tenant, owner, scram_verifier(password))
+        return {"user": role, "password": password, "database": self.dbname, "schema": self._schema_of(owner)}
+
+    @staticmethod
+    def _schema_of(owner: str) -> str:
+        return "public" if owner == APP_ROLE else owner
+
+    async def _apply_login(self, conn, tenant: str, owner: str, verifier: str) -> str:
+        """Create or update the project's login with this password verifier (also used to bring logins back after a
+        snapshot is restored onto another server: roles live outside the database)."""
+        role = connect_role(tenant)
+        if not await (await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = 'swsdb_projects'")).fetchone():
+            await conn.execute("CREATE ROLE swsdb_projects NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE")
+        r, o = pgsql.Identifier(role), pgsql.Identifier(owner)
+        if not await (await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", [role])).fetchone():
+            await conn.execute(pgsql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION "
+                                         "NOBYPASSRLS NOINHERIT CONNECTION LIMIT 20").format(r))
+        # a member of the tenant's role without its rights (NOINHERIT): sessions SET ROLE to it on login, so what a
+        # migration creates belongs to the tenant, and SET ROLE NONE leaves a role that can do nothing
+        await conn.execute(pgsql.SQL("GRANT {} TO {}").format(o, r))
+        await conn.execute(pgsql.SQL("GRANT swsdb_projects TO {}").format(r))
+        await conn.execute(pgsql.SQL("ALTER ROLE {} SET role = {}").format(r, pgsql.Literal(owner)))
+        # the project's schema in swsdb's database; in databases the project creates, their own public schema
+        await conn.execute(pgsql.SQL("ALTER ROLE {} RESET search_path").format(r))
+        await conn.execute(pgsql.SQL("ALTER ROLE {} IN DATABASE {} SET search_path = {}").format(
+            r, pgsql.Identifier(self.dbname), pgsql.Identifier(self._schema_of(owner))))
+        # scratch databases (Django's test database, Prisma's shadow database) are the project's own. The HTTP SQL
+        # API can't use this: CREATE DATABASE can't run inside the transaction every /v1/sql statement runs in
+        await conn.execute(pgsql.SQL("ALTER ROLE {} CREATEDB").format(o))
+        await conn.execute(pgsql.SQL("ALTER ROLE {} LOGIN PASSWORD {}").format(r, pgsql.Literal(verifier)))
+        await conn.execute("INSERT INTO swsdb.project_logins (tenant, role, verifier) VALUES (%s, %s, %s) "
+                           "ON CONFLICT (tenant) DO UPDATE SET role = EXCLUDED.role, verifier = EXCLUDED.verifier, "
+                           "issued_at = now()", [tenant, role, verifier])
+        return role
+
+    async def restore_logins(self) -> int:
+        """After a snapshot is restored: give every project its login back, with the password it had, so the
+        projects' DATABASE_URLs keep working on this server."""
+        rows = await self.rows("SELECT tenant, verifier FROM swsdb.project_logins WHERE verifier IS NOT NULL")
+        for row in rows:
+            owner = await self.tenant_role(row["tenant"])
+            async with self.pool.connection() as conn, conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(7367736463)")
+                await self._apply_login(conn, row["tenant"], owner, row["verifier"])
+        return len(rows)
+
+    async def login_info(self, tenant: str) -> dict:
+        rows = await self.rows(
+            "SELECT l.role, l.issued_at, "
+            "(SELECT count(*) FROM pg_stat_activity a WHERE a.usename = l.role) AS sessions "
+            "FROM swsdb.project_logins l JOIN pg_roles r ON r.rolname = l.role WHERE l.tenant = %s", [tenant])
+        owner = tenant_role(tenant)
+        dbs = await self.rows("SELECT d.datname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba "
+                              "WHERE r.rolname = %s ORDER BY 1", [owner])
+        out = {"user": connect_role(tenant), "database": self.dbname, "schema": self._schema_of(owner),
+               "issued": bool(rows), "databases": [d["datname"] for d in dbs]}
+        if rows:
+            out.update(issued_at=rows[0]["issued_at"].isoformat(), sessions=rows[0]["sessions"])
+        return out
+
+    async def revoke_login(self, tenant: str) -> bool:
+        """Drop the project's connection login and end its open sessions."""
+        role = connect_role(tenant)
+        owner = tenant_role(tenant)
+        async with self.pool.connection() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(7367736463)")
+            await conn.execute("DELETE FROM swsdb.project_logins WHERE tenant = %s", [tenant])
+            if not await (await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", [role])).fetchone():
+                return False
+            r = pgsql.Identifier(role)
+            await conn.execute(pgsql.SQL("ALTER ROLE {} NOLOGIN").format(r))
+            await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = %s", [role])
+            await conn.execute(pgsql.SQL("DROP OWNED BY {}").format(r))
+            await conn.execute(pgsql.SQL("DROP ROLE {}").format(r))
+            if await (await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", [owner])).fetchone():
+                await conn.execute(pgsql.SQL("ALTER ROLE {} NOCREATEDB").format(pgsql.Identifier(owner)))
+        return True
 
     async def query_as_user(self, tenant: str, user, statement, params, *, read_only: bool, timeout_s: float = 15,
                             max_rows: int = 1000) -> dict:

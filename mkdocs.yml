@@ -47,6 +47,7 @@ nav:
       - GraphRAG: quickstarts/graphrag.md
       - Agent memory over MCP: quickstarts/agent-memory.md
   - Guides:
+      - Start a new project: guides/projects.md
       - Documents and retrieval: guides/documents.md
       - Web console: guides/console.md
       - Evaluation: guides/evaluation.md

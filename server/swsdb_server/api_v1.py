@@ -6,7 +6,9 @@ import json
 import re
 import time
 from typing import Any, Literal
+from urllib.parse import quote
 
+import psycopg
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator
@@ -1088,6 +1090,52 @@ def router(caller) -> APIRouter:
             raise HTTPException(403, "resetting covers every tenant: it needs a key from the environment")
         await e.sql.execute("SELECT pg_stat_statements_reset()")
         return {"reset": True}
+
+    # -------------------------------------------------------------- project connections (Postgres)
+
+    def pg_endpoint(request: Request, sql: SqlStore) -> tuple[str, int, bool]:
+        """Host and port a project's code connects to, and whether this swsdb accepts such connections."""
+        s = request.app.state.settings
+        if sql.dsn:  # an external Postgres: its own address; reaching it is up to its network and pg_hba
+            p = psycopg.conninfo.conninfo_to_dict(sql.dsn)
+            return str(p.get("host") or "localhost"), int(p.get("port") or 5432), True
+        host = s.postgres_public_host or request.url.hostname or "localhost"
+        return host, s.postgres_public_port, s.postgres_access or s.expose_native
+
+    def pg_url(user: str, password: str, host: str, port: int, db: str) -> str:
+        h = f"[{host}]" if ":" in host else host
+        return f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}@{h}:{port}/{quote(db, safe='')}"
+
+    @r.get("/postgres", tags=["projects"])
+    async def postgres_info(request: Request, t: str = Depends(tenant), e: Engines = Depends(),
+                            _: str = Depends(admin)):
+        """The project's Postgres login: user, database, schema, whether a password was issued and open sessions."""
+        host, port, enabled = pg_endpoint(request, e.sql)
+        info = await e.sql.login_info(t)
+        url = pg_url(info["user"], "PASSWORD", host, port, info["database"])
+        return {**info, "host": host, "port": port, "enabled": enabled, "url": url,
+                "prisma_url": f"{url}?schema={quote(info['schema'], safe='')}"}
+
+    @r.post("/postgres/credentials", tags=["projects"], status_code=201)
+    async def postgres_credentials(request: Request, t: str = Depends(tenant), e: Engines = Depends(),
+                                   _: str = Depends(admin)):
+        """A connection string for the project's own code (SQLAlchemy, Prisma, Django, psql...), with a new password,
+        shown only this once. It works in the project's schema with the same rights as its SQL, nothing else."""
+        host, port, enabled = pg_endpoint(request, e.sql)
+        if not enabled:
+            raise HTTPException(409, "project connections are off (SWSDB_POSTGRES_ACCESS=false)")
+        out = await e.sql.issue_login(t)
+        url = pg_url(out["user"], out["password"], host, port, out["database"])
+        # Prisma works in schema "public" unless the URL names one; libpq tools refuse that parameter
+        return {**out, "host": host, "port": port, "url": url,
+                "prisma_url": f"{url}?schema={quote(out['schema'], safe='')}"}
+
+    @r.delete("/postgres/credentials", tags=["projects"])
+    async def postgres_revoke(t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(admin)):
+        """Remove the project's login: its password stops working and open sessions end."""
+        if not await e.sql.revoke_login(t):
+            raise NotFound("this project has no Postgres login")
+        return {"revoked": True}
 
     # -------------------------------------------------------------- storage
 

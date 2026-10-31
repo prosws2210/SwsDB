@@ -83,6 +83,36 @@ Readers are enforced inside Qdrant's search, again for every graph passage, and 
 Raw access to a documents collection (vector search, point reads, Cypher) would skip that filter, so it needs an admin
 key. See [Documents and retrieval](documents.md#permissions).
 
+## Project connections
+
+A project's own code can connect to Postgres with a connection string and use the Qdrant client
+([Start a new project](projects.md)). Neither opens anything beyond the project:
+
+- **Postgres.** By default Postgres listens beyond localhost inside the container, but `pg_hba.conf` admits only
+  members of `swsdb_projects` from the network, and only with SCRAM passwords. Members are the per-project logins
+  `swsdb_t_<tenant>__c`. The superuser, `swsdb_app` and tenants' own roles can't log in from outside.
+- **What a login is.** A login has no rights of its own (`NOINHERIT`). Every session starts as the project's role, so
+  it has exactly the rights the project's SQL has, in its schema, and whatever it creates belongs to the project.
+  `SET ROLE NONE` leaves a role that can do nothing.
+- **A project's own databases.** Once a project has a login, its role may create databases (`CREATEDB`), for Django's
+  test database and Prisma's shadow database. They belong to the project. Another project's login can connect to one,
+  since Postgres grants `CONNECT` to everyone, but it can't read its tables, create anything in it, drop it, rename it
+  or copy it as a template. The HTTP SQL API can't create databases, because every `/v1/sql` statement runs in a
+  transaction. Revoking the login takes `CREATEDB` away again.
+- **Passwords.** A password is generated, shown once, and stored by Postgres only as a SCRAM verifier. swsdb sends the
+  verifier, never the password, so it can't show up in statement statistics or logs. A new password works for new
+  connections only; revoking drops the login and ends its sessions. Each login allows 20 connections. swsdb's catalog
+  keeps the verifier, so a snapshot restored on another server brings the login back with the same password.
+- **Qdrant.** `/qdrant` is a gate in front of Qdrant, not an open port. It checks the swsdb key and rewrites
+  collection names, both in the path and in bodies that name a second collection. It refuses `init_from`, snapshots
+  (a snapshot recovery would make Qdrant fetch a URL), shards, aliases and cluster calls. Qdrant's own port and key
+  stay inside the container.
+- **Turning it off.** `SWSDB_POSTGRES_ACCESS=false` keeps Postgres on localhost.
+
+Directly connected code skips the per-call timeout, the one-statement rule and the read-only option of `/v1/sql`.
+Those limits protect the HTTP API, while a project connection is the project's own database. It is still confined to
+the project's schema and to Postgres's privileges, as listed above.
+
 ## End users
 
 An app's users sign in with email and password ([Auth](../reference/api.md#end-users-auth)) and send an access token

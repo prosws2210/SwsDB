@@ -43,13 +43,23 @@ def s(**kw) -> Settings:
 
 def test_engines_listen_on_localhost_unless_exposed():
     secret = new_secrets()
-    local, exposed = s(), s(expose_native=True)
+    local, exposed = s(postgres_access=False), s(expose_native=True)
     assert "listen_addresses = '127.0.0.1'" in render_pg_conf(local)
     assert "listen_addresses = '*'" in render_pg_conf(exposed)
     assert "0.0.0.0/0" not in render_pg_hba(local) and "0.0.0.0/0" in render_pg_hba(exposed)
     assert json.loads(render_qdrant_config(local, secret))["service"]["host"] == "127.0.0.1"
     assert json.loads(render_qdrant_config(exposed, secret))["service"]["host"] == "0.0.0.0"
     assert "bind 127.0.0.1 -::1" in render_redis_conf(local, secret)
+
+
+def test_project_connections_let_in_only_project_logins():
+    """By default Postgres listens beyond localhost, but the network lines admit only members of swsdb_projects (the
+    per-project logins): never the superuser or a tenant's own role."""
+    st = s()
+    assert "listen_addresses = '*'" in render_pg_conf(st)
+    remote = [ln.split() for ln in render_pg_hba(st).splitlines() if ln.startswith("host") and "/0" in ln]
+    assert len(remote) == 2 and all(r[1:3] == ["all", "+swsdb_projects"] and r[4] == "scram-sha-256"
+                                    for r in remote)
 
 
 def test_every_engine_requires_its_secret_and_qdrant_telemetry_is_off():

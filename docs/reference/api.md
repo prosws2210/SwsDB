@@ -79,6 +79,22 @@ schema. `params` are `%s` (a list) or `%(name)s` (an object) placeholders.
 (values show as `$1`, never the data): `?order=total|mean|calls|rows&limit=50`. A tenant's key sees its own roles; a
 key from the environment sees every role, swsdb's own work included, and may `POST /v1/query-stats/reset`.
 
+## Project connections
+
+Use one swsdb in place of a project's own database containers (see [Start a new project](../guides/projects.md)).
+
+| | |
+|---|---|
+| `GET /v1/postgres` | the project's Postgres login: `user`, `database`, `schema`, `host`, `port`, `issued`, open `sessions`, the `databases` the project created, and the URL with `PASSWORD` in place of the password, admin |
+| `POST /v1/postgres/credentials` | a new password and the full connection string (`url`, and `prisma_url` with `?schema=` for Prisma), shown once; creates the login on first use, admin |
+| `DELETE /v1/postgres/credentials` | remove the login and end its open sessions (the data stays), admin |
+| `/qdrant/...` | Qdrant's REST API for the project's own collections, for the standard Qdrant client (`prefix="qdrant"`, the swsdb key as its API key) |
+
+Through `/qdrant`, collection names are the project's own, and the collection is a swsdb raw vector collection. Only
+`/collections` and calls on one collection are offered, without snapshots, shards or aliases. `init_from` is refused,
+and `lookup_from` / `with_lookup` resolve inside the project. Writes need the admin key, documents collections are
+read-only (and admin only), end-user tokens are refused, and the lite profile answers 409.
+
 ## End users (Auth)
 
 Your app's users sign in with email and password and send the access token as `Authorization: Bearer <token>`. A

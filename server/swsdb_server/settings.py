@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     data_dir: Path = Path("/swsdb/data")
     run_dir: Path = Path("/run/swsdb")
     expose_native: bool = False
+    # project connections: Postgres accepts logins from the network, but only for the per-project roles swsdb issues
+    # (POST /v1/postgres/credentials), into the project's own schema. The port still has to be published (-p 5432:5432)
+    postgres_access: bool = True
+    # what the connection string shows for host and port (default: the host the request came to, and 5432)
+    postgres_public_host: str | None = None
+    postgres_public_port: int = 5432
     # Qdrant's own web dashboard at :6333/dashboard (it asks for the Qdrant API key; reachable from outside the
     # container only with SWSDB_EXPOSE_NATIVE and the port published)
     qdrant_dashboard: bool = True

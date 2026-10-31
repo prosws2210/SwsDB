@@ -21,7 +21,7 @@ Passage 5 never mentions Project Orion: swsdb found it through the knowledge gra
 configured. From `docker run` to these answers took 19 seconds on a laptop. Open <http://localhost:6464/console> to
 see how.
 
-**Docs:** [quickstart](docs/quickstart.md) · [RAG app](docs/quickstarts/rag-app.md) · [GraphRAG](docs/quickstarts/graphrag.md) ·
+**Docs:** [quickstart](docs/quickstart.md) · [start a new project](docs/guides/projects.md) · [RAG app](docs/quickstarts/rag-app.md) · [GraphRAG](docs/quickstarts/graphrag.md) ·
 [agent memory over MCP](docs/quickstarts/agent-memory.md) · [LangChain, LlamaIndex, TypeScript](docs/guides/integrations.md) ·
 [deployment (Compose, Helm, managed engines)](docs/guides/deployment.md) · [security](docs/guides/security.md) ·
 [backups and upgrades](docs/guides/backups.md) · [webhooks](docs/guides/webhooks.md) · [API](docs/reference/api.md) ·
@@ -37,6 +37,9 @@ database server.
 
 ## What you get
 
+- **One container instead of three for every project.** Each project gets a Postgres connection string for
+  SQLAlchemy, Alembic, Django, Prisma or psql, and the Qdrant API for the standard Qdrant client. Each sees only its own
+  schema and collections. See [Start a new project](docs/guides/projects.md).
 - **Documents in, cited answers out.** PDF, Markdown, HTML or text are chunked by structure and embedded (dense and
   BM25, with a bundled model that works offline, or any OpenAI-compatible endpoint). The people, projects and products
   they mention are linked in a graph. `answer` replies citing `[n]` passages; with no model configured it answers

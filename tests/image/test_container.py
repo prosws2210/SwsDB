@@ -149,12 +149,15 @@ def test_first_start_is_ready_with_all_engines(volume, boxes):
     assert took < 60, f"first start took {took:.1f}s"
     # Qdrant's own dashboard is served (on the native port, so only inside the container unless exposed)
     assert "<title>UI | Qdrant" in b.exec("curl", "-s", "http://127.0.0.1:6333/dashboard/")
-    # nothing listens beyond localhost inside the container except the API
+    # beyond localhost inside the container only the API and Postgres listen; Postgres admits only project logins
+    # from there (test_projects), and Qdrant and FalkorDB stay inside
     listening = b.exec("cat", "/proc/net/tcp", "/proc/net/tcp6")
     exposed = {int(line.split()[1].split(":")[1], 16) for line in listening.splitlines()[1:]
                if len(line.split()) > 3 and line.split()[3] == "0A"
                and line.split()[1].split(":")[0].strip("0") == ""}
-    assert exposed == {6464}, f"ports bound to all interfaces: {sorted(exposed)}"
+    assert exposed == {6464, 5432}, f"ports bound to all interfaces: {sorted(exposed)}"
+    hba = b.exec("sh", "-c", "grep -v '^#' /swsdb/data/postgres/pg_hba.conf", user="root")
+    assert {ln.split()[2] for ln in hba.splitlines() if "/0" in ln} == {"+swsdb_projects"}
 
 
 def test_data_survives_restart_and_a_new_container(volume, boxes):

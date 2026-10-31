@@ -1704,6 +1704,33 @@ const hits = await db.collection("handbook").query("refund policy", { k: 5 });`]
 }
 
 Read-only tools at /mcp; tools that add documents and memories at /mcp/rw.`],
+    ["PostgreSQL", `# the connection string from "Your project's Postgres" above, as DATABASE_URL
+
+# SQLAlchemy (and Alembic)
+import os
+from sqlalchemy import create_engine
+engine = create_engine(os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"))
+
+# Django: settings.py (pip install dj-database-url)
+DATABASES = {"default": dj_database_url.parse(os.environ["DATABASE_URL"])}
+
+# Prisma: use the URL with ?schema=<the project's schema> (prisma_url; Prisma uses "public" otherwise).
+# migrate dev, migrate deploy and db push work
+datasource db { provider = "postgresql"  url = env("DATABASE_URL") }  # Prisma 7: in prisma.config.ts
+
+# psql
+psql "$DATABASE_URL"`],
+    ["Qdrant client", `# Python: pip install qdrant-client
+from qdrant_client import QdrantClient
+q = QdrantClient(url="${url}", prefix="qdrant", api_key=os.environ["SWSDB_API_KEY"])
+q.get_collections()  # this project's collections only
+
+// TypeScript: npm install @qdrant/js-client-rest
+import { QdrantClient } from "@qdrant/js-client-rest";
+const q = new QdrantClient({ url: "${url}", prefix: "qdrant", apiKey: process.env.SWSDB_API_KEY });
+
+# The project comes from the key: use a key made for it on the API keys page.
+# REST only (not gRPC). Collections you make here are swsdb collections too.`],
     ["LangChain", `pip install "swsdb[langchain]"
 
 import os
@@ -1721,6 +1748,39 @@ docs = retriever.invoke("What is the refund policy?")`]];
     fill(body, h("div", { class: "row end" }, copyButton(code)), h("pre", { class: "codeblock wrap" }, code));
   };
   draw();
+  const pgBox = h("div", { class: "card card-pad stack" });
+  const pgDraw = async (fresh) => {
+    let info;
+    try { info = await api("GET", "/v1/postgres"); } catch (e) {
+      fill(pgBox, h("b", {}, "Your project's Postgres"), h("div", { class: "small muted" },
+        e instanceof ApiError && e.status === 403 ? "A connection string needs the project's admin key." : `Not available: ${e.message}`));
+      return;
+    }
+    const shown = fresh ? fresh.url : info.url;
+    const issue = btn(info.issued ? "New password" : "Create connection string", async () => {
+      const r = await guard(() => api("POST", "/v1/postgres/credentials"));
+      if (r) pgDraw(r);
+    }, { kind: info.issued ? "ghost" : "primary", ico: "key" });
+    let armed = false;
+    const revoke = info.issued ? btn("Revoke", async (ev) => {
+      if (!armed) { armed = true; ev.currentTarget.textContent = "Click again to revoke"; return; }
+      if (await guard(() => api("DELETE", "/v1/postgres/credentials"))) { toast("Login revoked"); pgDraw(); }
+    }, { ico: "x" }) : null;
+    fill(pgBox,
+      h("div", { class: "row between" }, h("b", {}, "Your project's Postgres"), h("div", { class: "row" }, issue, revoke)),
+      h("div", { class: "small muted" }, "For SQLAlchemy, Prisma, Django or psql: the project's own schema (", h("span", { class: "mono" }, info.schema),
+        "), the same tables as the SQL tab. ", info.issued ? `${plural(info.sessions || 0, "open session")}.` : "No login yet."),
+      fresh ? h("div", { class: "small warn-text" }, "Copy it now: the password is shown only this once.") : null,
+      h("div", { class: "row" }, h("pre", { class: "codeblock wrap grow" }, shown), copyButton(shown)),
+      h("div", { class: "tiny muted" }, "For Prisma (it needs the schema named in the URL):"),
+      h("div", { class: "row" }, h("pre", { class: "codeblock wrap grow" }, fresh ? fresh.prisma_url : info.prisma_url),
+        copyButton(fresh ? fresh.prisma_url : info.prisma_url)),
+      info.databases && info.databases.length ? h("div", { class: "small muted" }, "Databases this project created (scratch, not in snapshots): ",
+        h("span", { class: "mono" }, info.databases.join(", "))) : null,
+      info.enabled ? null : h("div", { class: "small muted" }, "Connections from outside are off (SWSDB_POSTGRES_ACCESS=false)."),
+      h("div", { class: "tiny muted" }, `Publish the port to reach it from your machine (-p ${info.port}:5432); from another container on the same network, use the container's name as the host.`));
+  };
+  pgDraw();
   const scrim = h("div", { class: "scrim", onclick: closeDrawer });
   const drawer = h("aside", { class: "drawer", role: "dialog", "aria-label": "Connect" },
     h("div", { class: "row between" }, h("h2", {}, "Connect to swsdb"), btn("", closeDrawer, { ico: "x", title: "Close" })),
@@ -1728,7 +1788,7 @@ docs = retriever.invoke("What is the refund policy?")`]];
       h("dt", {}, "Tenant"), h("dd", { class: "mono" }, t), h("dt", {}, "Key"),
       h("dd", {}, "Send it as the ", h("span", { class: "kbd" }, "api-key"), " header. Make one on the ",
         h("a", { href: "#keys", onclick: closeDrawer }, "API keys"), " page; this page never shows a stored key.")),
-    tabs, body,
+    pgBox, tabs, body,
     h("div", { class: "small muted" }, "The full API is at ", h("a", { href: "/docs", target: "_blank", rel: "noopener" }, "/docs"),
       " (OpenAPI)."));
   document.body.append(scrim, drawer);
@@ -2679,11 +2739,12 @@ async function health() {
 function setTheme(t) {
   document.documentElement.dataset.theme = t;
   localStorage.setItem("swsdb.theme", t);
-  fill($("#theme-btn"), icon(t === "dark" ? "sun" : "moon"));
+  fill($("#theme-btn"), icon(t === "dark" ? "sun" : "moon"), h("span", { class: "t" }, t === "dark" ? "Light mode" : "Dark mode"));
 }
 function drawKeyButton() {
   const has = !!sessionStorage.getItem("swsdb.key");
-  fill($("#key-btn"), icon(has ? "lock" : "key"), has ? "Key set" : "API key");
+  fill($("#key-btn"), icon(has ? "lock" : "key"), h("span", { class: "t" }, has ? "Key set" : "API key"));
+  $("#key-btn").title = has ? "API key set (click to change)" : "Set the API key";
 }
 function openKeyDialog() { const d = $("#key-dialog"); if (!d.open) d.showModal(); }
 
@@ -2708,11 +2769,16 @@ async function applyKey() {
 
 function init() {
   fill($("#brand-mark"), icon("database"));
-  const link = (p) => h("a", { href: `#${p}`, "data-page": p }, icon(PAGES[p].icon), PAGES[p].title.replace(" explorer", ""));
-  fill($("#nav"), h("div", { class: "nav-label" }, "Data"), ["overview", "collections", "search", "graph", "data", "storage", "reports"].map(link),
-    h("div", { class: "nav-label" }, "Quality"), ["eval", "doctor", "advisors", "logs"].map(link),
-    h("div", { class: "nav-label" }, "Admin"), ["users", "policies", "keys", "backups"].map(link));
+  const link = (p) => h("a", { href: `#${p}`, "data-page": p, title: PAGES[p].title },
+    icon(PAGES[p].icon), h("span", { class: "t" }, PAGES[p].title.replace(" explorer", "")));
+  const section = (name) => h("div", { class: "nav-label" }, h("span", { class: "t" }, name));
+  fill($("#nav"), section("Data"), ["overview", "collections", "search", "graph", "data", "storage", "reports"].map(link),
+    section("Quality"), ["eval", "doctor", "advisors", "logs"].map(link),
+    section("Admin"), ["users", "policies", "keys", "backups"].map(link));
   setTheme(localStorage.getItem("swsdb.theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
+  $("#search-btn").prepend(icon("search"));
+  $(".tenant-row").prepend(icon("database"));
+  fill($("#connect-btn"), icon("link"), h("span", { class: "t" }, "Connect"));
   $("#theme-btn").addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   $("#tenant").value = state.tenant;
   $("#tenant").addEventListener("change", (e) => {
@@ -2745,7 +2811,7 @@ function init() {
   });
   window.addEventListener("hashchange", () => route());
   fetch("/").then((r) => r.json()).then((info) => {
-    fill($("#version"), `swsdb ${info.version}`, h("br"), `engines: ${(info.engines || []).join(" · ")}`);
+    fill($("#version"), `v${info.version} · ${(info.engines || []).join(" · ")}`);
   }).catch(() => {});
   health();
   setInterval(health, 4000);

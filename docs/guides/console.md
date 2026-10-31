@@ -28,7 +28,9 @@ and runs under a strict Content-Security-Policy (no inline code, nothing loaded 
 In Collections, a document's panel downloads its **original file** as it was uploaded (always as a download, never shown as a page).
 
 **Connect** (in the sidebar) shows the server's address and ready-to-paste code for Python, TypeScript, curl, an MCP
-client and LangChain, for the current tenant. It never shows a stored key.
+client, PostgreSQL tools (SQLAlchemy, Django, Prisma, psql), the Qdrant client and LangChain, for the current tenant.
+With the project's admin key it also makes the project's **Postgres connection string** (the password is shown once;
+**New password** replaces it, **Revoke** removes the login). It never shows a stored key.
 
 The Data page goes through the API like everything else: your key's tenant and role apply, SQL runs as the tenant's
 sandbox role, and nothing reaches swsdb's own catalog. With Neo4j as the graph engine the Cypher tab is off (see

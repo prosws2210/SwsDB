@@ -35,13 +35,13 @@ class BootstrapError(RuntimeError):
 
 
 def render_pg_conf(s: Settings) -> str:
-    listen = "*" if s.expose_native else "127.0.0.1"
+    listen = "*" if s.expose_native or s.postgres_access else "127.0.0.1"
     return "\n".join([
         "# Written by swsdb on every start; change settings with ALTER SYSTEM or SWSDB_* variables.",
         f"listen_addresses = '{listen}'",
         "port = 5432",
         f"unix_socket_directories = '{s.pg_socket_dir}'",
-        "max_connections = 100",
+        "max_connections = 150",
         "shared_buffers = 128MB",
         "password_encryption = 'scram-sha-256'",
         "log_destination = 'stderr'",
@@ -67,6 +67,11 @@ def render_pg_hba(s: Settings) -> str:
     ]
     if s.expose_native:
         lines += ["host    all   all   0.0.0.0/0     scram-sha-256", "host    all   all   ::/0          scram-sha-256"]
+    elif s.postgres_access:
+        # only the per-project logins (members of swsdb_projects): into swsdb's database, where they reach their
+        # project's schema, and the scratch databases a project creates (Django's test, Prisma's shadow database)
+        lines += ["host    all   +swsdb_projects   0.0.0.0/0   scram-sha-256",
+                  "host    all   +swsdb_projects   ::/0        scram-sha-256"]
     return "\n".join(lines) + "\n"
 
 
