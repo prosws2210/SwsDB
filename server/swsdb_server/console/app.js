@@ -236,7 +236,7 @@ const PAGES = {
   graph: { title: "Graph explorer", icon: "graph", sub: "Entities extracted from your documents, how they relate and where they're mentioned." },
   eval: { title: "Evaluation", icon: "eval", sub: "Measure retrieval on your own questions and compare configurations with numbers." },
   backups: { title: "Backups", icon: "archive", sub: "Snapshots of every engine at one consistent point, scheduled backups and their copies in S3." },
-  doctor: { title: "Doctor", icon: "doctor", sub: "Check that Qdrant and the graph agree with Postgres, the source of truth, and repair drift." },
+  doctor: { title: "Doctor", icon: "doctor", sub: "Check that the vector store and the graph agree with Postgres, the source of truth, and repair drift." },
 };
 const view = {};
 
@@ -273,7 +273,7 @@ view.overview = async (root, _arg, actions) => {
     e.restarts_seen ? h("div", { class: "tiny muted" }, `${plural(e.restarts_seen, "restart")} seen since start`) : null);
 
   const pending = sync.pending ?? 0;
-  const consistency = card(cardHead("Consistency", "Changes accepted by Postgres, still being applied to Qdrant and the graph"),
+  const consistency = card(cardHead("Consistency", "Changes accepted by Postgres, still being applied to the vector store and the graph"),
     h("div", { class: "row" },
       ring(pending ? 0.25 : 1, pending ? (sync.retrying ? "bad" : "warn") : "", pending ? String(pending) : "✓",
            pending ? "pending" : "in sync"),
@@ -583,7 +583,13 @@ const typeDot = (t) => { const d = h("span", { class: "type-dot" }); d.style.bac
 
 view.graph = async (root, _arg, actions) => {
   fill(root, skeleton("block", 2));
-  const cols = (await documentCollections()).filter((c) => c.info.documents.graph);
+  const [st, all] = await Promise.all([api("GET", "/v1/status"), documentCollections()]);
+  if (st.engines.graph && st.engines.graph.engine === "neo4j") {
+    fill(root, empty("graph", "The explorer needs pass-through Cypher",
+      "With Neo4j as the graph engine, collections share one Neo4j database, so swsdb runs only its own graph queries. Search and Ask still follow the graph; open the entities in Neo4j's own browser."));
+    return;
+  }
+  const cols = all.filter((c) => c.info.documents.graph);
   if (!cols.length) { fill(root, empty("graph", "No collections with a graph", "Create a documents collection while the graph engine is enabled.")); return; }
   let coll = cols[0].name;
   const listCard = h("div", { class: "card flush" });
@@ -858,13 +864,13 @@ view.backups = async (root, _arg, actions) => {
 };
 
 const FINDINGS = {
-  missing_vectors: ["vector", "Missing or hidden vectors", "Documents whose live version isn't fully in Qdrant. Repair re-embeds them from the catalog."],
+  missing_vectors: ["vector", "Missing or hidden vectors", "Documents whose live version isn't fully in the vector store. Repair re-embeds them from the catalog."],
   stale_vectors: ["vector", "Old versions left behind", "Vectors of versions that are no longer live. Repair deletes them."],
   orphan_vectors: ["vector", "Vectors of unknown documents", "Points whose document doesn't exist in the catalog. Repair deletes them."],
   graph_mismatch: ["graph", "Graph out of step", "Documents whose graph doesn't match the catalog. Repair rebuilds it from the catalog (no LLM calls)."],
   orphan_graph: ["graph", "Graph nodes of unknown documents", "Repair removes them."],
   stuck: ["clock", "Stuck changes", "Accepted changes with nothing applying them. Repair queues them again."],
-  missing_vector_collection: ["database", "Missing Qdrant collection", "Repair recreates it and re-indexes every document."],
+  missing_vector_collection: ["database", "Missing vector collection", "Repair recreates it and re-indexes every document."],
 };
 
 view.doctor = async (root, _arg, actions) => {
@@ -905,7 +911,7 @@ view.doctor = async (root, _arg, actions) => {
   fill(actions, h("label", { class: "check" }, all, "All tenants"), btn("Check now", () => check(false), { kind: "primary", ico: "doctor" }));
   fill(root, card(h("div", { class: "row" }, h("div", { class: "icon-tile green" }, icon("shield")),
     h("div", { class: "grow" }, h("b", {}, "Postgres is the source of truth"),
-      h("div", { class: "small muted" }, "The doctor compares it with what Qdrant and the graph actually hold. Checking never changes anything; it also runs automatically every 10 minutes.")))), out);
+      h("div", { class: "small muted" }, "The doctor compares it with what the vector store and the graph actually hold. Checking never changes anything; it also runs automatically every 10 minutes.")))), out);
   await check(false);
 };
 

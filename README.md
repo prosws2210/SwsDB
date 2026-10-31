@@ -58,7 +58,9 @@ database server.
 - **Fits your stack.** Python (sync and async) and TypeScript SDKs, LangChain and LlamaIndex retrievers, signed webhooks
   when documents become searchable, optional cross-encoder re-ranking, and a `swsdb.yaml` config file.
 - **Runs your way.** One container by default; or Docker Compose with each engine in its own container, a Helm chart,
-  or managed engines (RDS, Qdrant Cloud, FalkorDB Cloud) by URL.
+  or managed engines (RDS, Qdrant Cloud, FalkorDB Cloud, Neo4j) by URL. `SWSDB_PROFILE=lite` keeps vectors and graphs
+  inside Postgres (pgvector, Apache AGE), so Postgres is the only engine. Several servers can share one set of engines
+  (`deploy/compose/docker-compose.ha.yml`).
 - **Measured.** Golden question sets with recall, MRR and nDCG per configuration; a "why isn't this searchable?"
   diagnosis; Prometheus metrics and OpenTelemetry traces; a web console; a retrieval-quality gate in CI.
 - **No lock-in.** The native engines stay reachable (`swsdb-admin credentials`). SQL and Cypher pass through, sandboxed.

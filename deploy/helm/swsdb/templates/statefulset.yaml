@@ -1,6 +1,13 @@
 {{- if and (not .Values.apiKey.value) (not .Values.apiKey.existingSecret) }}
 {{- fail "set apiKey.value or apiKey.existingSecret: a swsdb reachable from a cluster must not run without an API key" }}
 {{- end }}
+{{- $many := gt (int .Values.replicas) 1 }}
+{{- if and $many (not .Values.externalEngines.existingSecret) }}
+{{- fail "replicas > 1 needs external engines: set externalEngines.existingSecret (with postgres-url) so every server shares them" }}
+{{- end }}
+{{- if and $many (ne .Values.profile "lite") (not .Values.externalEngines.qdrantUrl) }}
+{{- fail "replicas > 1 needs an external Qdrant (externalEngines.qdrantUrl), or profile: lite" }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -8,7 +15,8 @@ metadata:
   labels: {{- include "swsdb.labels" . | nindent 4 }}
 spec:
   serviceName: {{ include "swsdb.fullname" . }}
-  replicas: 1  # one pod: swsdb is a single-node database (it locks its volume)
+  replicas: {{ .Values.replicas }}
+  podManagementPolicy: Parallel
   selector:
     matchLabels: {{- include "swsdb.selector" . | nindent 6 }}
   template:
@@ -45,6 +53,14 @@ spec:
             - name: SWSDB_ENGINES
               value: {{ . | quote }}
             {{- end }}
+            {{- if ne .Values.profile "default" }}
+            - name: SWSDB_PROFILE
+              value: {{ .Values.profile | quote }}
+            {{- end }}
+            {{- if $many }}
+            - name: SWSDB_FILES
+              value: postgres
+            {{- end }}
             {{- with .Values.externalEngines }}
             {{- if .existingSecret }}
             - name: SWSDB_POSTGRES_URL
@@ -57,6 +73,12 @@ spec:
             {{- if .qdrantUrl }}
             - name: SWSDB_QDRANT_URL
               value: {{ .qdrantUrl | quote }}
+            {{- end }}
+            {{- if .neo4jUrl }}
+            - name: SWSDB_NEO4J_URL
+              value: {{ .neo4jUrl | quote }}
+            - name: SWSDB_NEO4J_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .existingSecret }}, key: {{ .neo4jPasswordKey }}}}
             {{- end }}
             {{- end }}
             {{- with .Values.llm }}

@@ -1,0 +1,34 @@
+# Two swsdb servers on the same engines, on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ha.yml up -d
+#
+# Both servers take requests (put a load balancer in front of ports 6464 and 6465) and share the ingestion work.
+# Uploaded originals are kept in Postgres (SWSDB_FILES=postgres), so either server can process any upload, and API
+# key changes, snapshots and restores are coordinated through Postgres. Scheduled backups and reconciliation run on
+# one of them (the other takes over if it stops). Snapshots are written to the volume of the server that takes them:
+# set the SWSDB_BACKUP_S3_* variables so every server can fetch them.
+
+services:
+  swsdb:
+    environment:
+      SWSDB_FILES: postgres
+      SWSDB_SERVER_ID: swsdb-1
+
+  swsdb-2:
+    extends:
+      file: docker-compose.yml
+      service: swsdb
+    ports: !override
+      - "${SWSDB_PORT_2:-6465}:6464"
+    environment:
+      SWSDB_FILES: postgres
+      SWSDB_SERVER_ID: swsdb-2
+    volumes: !override
+      - swsdb-2-data:/swsdb/data
+    depends_on:
+      postgres: {condition: service_healthy}
+      qdrant: {condition: service_started}
+      falkordb: {condition: service_healthy}
+
+volumes:
+  swsdb-2-data:

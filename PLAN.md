@@ -13,7 +13,7 @@ Last updated: 2026-10-31 · Owner: Shakti Swaroop Sahu · Status: Phase 6 done (
 | 4 Consistency | **done** | Transactional outbox, idempotent sync steps, transient/permanent errors with backoff and immediate retry on engine recovery, catalog-checked queries (deletes hidden at once, only live versions), reconciliation (`/v1/admin/reconcile`, `swsdb doctor`, every 10 min) that rebuilds the graph without LLM calls. Exit criterion met: 100/100 chaos rounds converged with zero orphans and zero deleted content returned (13 Postgres kills, 22 Qdrant kills, 16 FalkorDB kills, 18 server kills, 31 engines held down mid-write) ([ADR 0003](docs/adr/0003-consistency-model.md)) |
 | 5 Console, evaluation, observability | **done** | Web console (overview, collections with per-document diagnosis, search playground, graph explorer, evaluation, doctor), served offline with a strict CSP; golden sets and stored evaluation runs comparing configurations (hit, recall, MRR, nDCG, answer found, evidence size, latency); Prometheus `/metrics`; OpenTelemetry traces; diagnosis endpoint. Re-ranking moved to Phase 7 (needs another model; evaluation will show whether it pays) |
 | 6 Hardening and public v0.1 | **done** | Snapshots and restore across all engines at one consistent point, on another machine and on newer versions ([ADR 0005](docs/adr/0005-snapshots.md)); upgrade path with a pre-migration dump and refusal of newer data (tested against the previous release in CI). MCP server over HTTP (`/mcp`, `/mcp/rw`) and stdio (`swsdb mcp`) with agent memory. Cited answers (`/answer`: a model when configured, extractive otherwise). Security review: tenant-bound keys and a Postgres role per tenant ([ADR 0004](docs/adr/0004-tenant-isolation.md)), 8 findings fixed, cross-tenant probes on every read path and MCP tool. TLS, secrets from files. Benchmarks and a retrieval-quality gate in CI. Docs site with three quickstarts and `examples/`. Release workflow: multi-arch (amd64, arm64), cosign-signed, SBOM and provenance |
-| 7 After v0.1 | **mostly done** | Done: TypeScript SDK; LangChain and LlamaIndex retrievers; async Python client; Compose layout with engines in their own containers and external managed engines (`SWSDB_POSTGRES_URL`, `SWSDB_QDRANT_URL`, `SWSDB_FALKORDB_URL`), tested end to end; Helm chart; scheduled backups to S3-compatible storage; webhooks; optional cross-encoder re-ranking; `swsdb.yaml`; typed Cypher results; availability story ([ADR 0006](docs/adr/0006-availability.md)). Designed, not shipped: Neo4j (multi-database only) and the Postgres-only lite profile ([ADR 0007](docs/adr/0007-other-graph-engines.md)); active-active servers; hosted offering (depends on L1) |
+| 7 After v0.1 | **done** | TypeScript SDK; LangChain and LlamaIndex retrievers; async Python client; Compose layout with engines in their own containers and external managed engines (`SWSDB_POSTGRES_URL`, `SWSDB_QDRANT_URL`, `SWSDB_FALKORDB_URL`); Helm chart; scheduled backups to S3-compatible storage; webhooks; optional cross-encoder re-ranking; `swsdb.yaml`; typed Cypher results; the lite profile (`SWSDB_PROFILE=lite`: pgvector + Apache AGE in Postgres, same quality floors and security suite); Neo4j as an external graph engine (`SWSDB_NEO4J_URL`, retrieval only: pass-through Cypher refused on its shared database); several servers on shared engines (`SWSDB_FILES=postgres`, [ADR 0006](docs/adr/0006-availability.md)). Open: Neo4j Enterprise database-per-collection (needs a license to test, [ADR 0007](docs/adr/0007-other-graph-engines.md)); a hosted offering is a business decision (L1), and the lite profile removes its licensing blocker |
 
 Decisions made while building (beyond the ADRs):
 - **No catalog in Phase 2.** A collection is the engine objects named `sw_<tenant>__<collection>`; a vector-only
@@ -318,9 +318,9 @@ Estimates are for one developer working consistently; adjust after Phase 0.
 ### Phase 7: After v0.1
 - TypeScript SDK; LangChain / LlamaIndex integrations.
 - Compose and Helm layouts with engines in separate containers; external managed engines.
-- Neo4j adapter (external), AGE "lite" profile.
-- Replication / HA story; scheduled backups to S3-compatible storage.
-- Possible hosted offering (depends on L1).
+- Neo4j adapter (external) and AGE "lite" profile: done ([ADR 0007](docs/adr/0007-other-graph-engines.md)).
+- Replication / HA story (several servers on shared engines, [ADR 0006](docs/adr/0006-availability.md)); scheduled backups to S3-compatible storage: done.
+- Possible hosted offering (depends on L1; the lite profile runs with no SSPL component).
 
 ## 8. Testing strategy
 - **Unit:** adapters, chunking, fusion, ACL resolution, versioning rules.
@@ -358,7 +358,7 @@ Estimates are for one developer working consistently; adjust after Phase 0.
 | ID | Decision | Options | Recommendation |
 |---|---|---|---|
 | L1 | Default graph engine | FalkorDB (fast GraphRAG, SSPL) · Apache AGE (in Postgres, Apache-2.0) | **Decided: FalkorDB** ([ADR 0002](docs/adr/0002-graph-engine-falkordb.md)); hosted offering needs a FalkorDB commercial license or the AGE profile |
-| L2 | "Lite" profile | none · Postgres-only (pgvector + AGE) | Offer later as `SWSDB_PROFILE=lite` for tiny machines |
+| L2 | "Lite" profile | none · Postgres-only (pgvector + AGE) | **Done:** `SWSDB_PROFILE=lite` ([ADR 0007](docs/adr/0007-other-graph-engines.md)) |
 | L3 | API port | 6464 · other | 6464 (no clash with the engines' defaults); confirm no common clash |
 | L4 | Server language | Python · Go · Rust | Python for v1; revisit with profiling |
 | L5 | Engine pinning | pin exact engine versions per swsdb release | Yes; upgrade engines only in minor releases with migration tests |

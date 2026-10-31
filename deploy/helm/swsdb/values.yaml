@@ -1,5 +1,5 @@
-# swsdb runs as one pod (it is a single-node database). By default the pod runs all three engines itself, on one
-# volume. Point it at engines elsewhere (managed services, or charts of your choice) with `externalEngines`.
+# By default swsdb runs as one pod with all three engines inside it, on one volume. Point it at engines elsewhere
+# (managed services, or charts of your choice) with `externalEngines`; then `replicas` can be more than 1.
 
 image:
   repository: ghcr.io/prosws2210/swsdb
@@ -24,6 +24,15 @@ externalEngines:
   qdrantUrl: ""                        # e.g. https://xyz.eu-central.aws.cloud.qdrant.io:6333
   qdrantApiKeyKey: qdrant-api-key
   falkordbUrlKey: falkordb-url         # redis://:password@host:6379 (rediss:// for TLS)
+  neo4jUrl: ""                         # or Neo4j as the graph engine, e.g. http://neo4j:7474 (retrieval only)
+  neo4jPasswordKey: neo4j-password
+
+# default: Qdrant and FalkorDB beside Postgres. lite: vectors and graphs inside Postgres (pgvector, Apache AGE).
+profile: default
+
+# Servers. More than one needs every engine external (externalEngines, or lite with an external Postgres); they share
+# the work and keep uploads in Postgres (SWSDB_FILES=postgres is set for them).
+replicas: 1
 
 # Which engines exist at all (sql, vector, graph). Empty: all three.
 engines: ""

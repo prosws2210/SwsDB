@@ -45,7 +45,8 @@ def digest(key: str) -> bytes:
 
 
 class KeyStore:
-    """Managed keys, cached in memory (this one process is the only writer, so the cache can't go stale)."""
+    """Managed keys, cached in memory. Other servers on the same database are told about every change
+    (`changed`, a cluster notification), and drop their cache when they hear it."""
 
     TOUCH_EVERY_S = 60.0
 
@@ -54,6 +55,10 @@ class KeyStore:
         self._rows: dict[str, dict] | None = None
         self._lock = asyncio.Lock()
         self._touched: dict[str, float] = {}
+        self.changed = None  # async callback after a create or revoke
+
+    def forget(self) -> None:
+        self._rows = None
 
     async def _load(self) -> dict[str, dict]:
         if self._rows is not None:
@@ -105,6 +110,8 @@ class KeyStore:
             "INSERT INTO swsdb.api_keys (id, hash, tenant, role, name) VALUES (%s, %s, %s, %s, %s) "
             "RETURNING id, tenant, role, name, created_at", [kid, digest(key), tenant, role, name]))[0]
         (await self._load())[kid] = {"id": kid, "hash": digest(key), "tenant": tenant, "role": role}
+        if self.changed:
+            await self.changed()
         return {**public(row), "key": key}
 
     async def list(self, tenant: str | None) -> list[dict]:
@@ -122,6 +129,8 @@ class KeyStore:
         rows = await self.sql.rows(f"UPDATE swsdb.api_keys SET revoked_at = now() WHERE {where} "  # noqa: S608
                                    "AND revoked_at IS NULL RETURNING id", params)
         (await self._load()).pop(kid, None)
+        if rows and self.changed:
+            await self.changed()
         return bool(rows)
 
 

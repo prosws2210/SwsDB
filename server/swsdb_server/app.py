@@ -22,11 +22,14 @@ from .answer import Answerer
 from .api_v1 import router as v1_router
 from .auth import Caller, KeyStore
 from .backups import Backups
+from .cluster import Cluster
 from .documents import Documents
 from .embed import Embedder
 from .extract import Extractor, NameExtractor
 from .health import Monitor, qdrant_key, qdrant_url, read_secrets
+from .lite import AgeGraphStore, PgVectorStore
 from .names import NameError_
+from .neo4j import Neo4jGraphStore
 from .settings import Settings
 from .snapshot import Snapshots
 from .stores import Conflict, Forbidden, GraphStore, NotFound, SqlStore, StoreError, Unavailable, VectorStore
@@ -70,6 +73,7 @@ async def _start_documents(app: FastAPI) -> None:
             extractor = NameExtractor()
             log.info("entity linking by names (set SWSDB_LLM_MODEL for model-based extraction)")
     docs = Documents(s, app.state.sql, app.state.vector, app.state.graph, embedder, extractor)
+    docs.cluster = app.state.cluster
     delay = 1.0
     while True:  # e.g. Postgres restarting right now: keep trying, /readyz stays 503 meanwhile
         try:
@@ -105,6 +109,20 @@ async def _sync_stats(app: FastAPI) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+async def _on_cluster_event(app: FastAPI, event: dict) -> None:
+    """Another server changed something this one caches (or this one may have missed events: reset)."""
+    kind = event.get("kind")
+    if kind in ("keys", "reset"):
+        app.state.keys.forget()
+    if kind in ("graphs", "reset") and app.state.graph is not None:
+        app.state.graph.forget()
+    if kind == "reset" and app.state.sql is not None:
+        app.state.sql.forget()  # tenant roles and their passwords may have changed with a restore
+        await app.state.sql.drop_connections()
+        log.info("caches reset (%s)", f"restore on {event['from']}" if event.get("from") else "event connection "
+                 "re-established")
+
+
 def documents_expected(app: FastAPI) -> bool:
     return app.state.sql is not None and app.state.vector is not None
 
@@ -123,18 +141,32 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
             secret = read_secrets(s)
             if "sql" in s.engines:
                 app.state.sql = SqlStore(None if s.postgres_url else str(s.pg_socket_dir),
-                                         dsn=s.postgres_url.get_secret_value() if s.postgres_url else None)
+                                         dsn=s.postgres_url.get_secret_value() if s.postgres_url else None,
+                                         own_pool=12 if s.profile == "lite" else 4)
                 app.state.sql.backup_dir = s.data_dir / "backups"
                 await app.state.sql.open()
                 made.append(app.state.sql)
             if "vector" in s.engines:
-                app.state.vector = VectorStore(qdrant_url(s), qdrant_key(s, secret))
+                app.state.vector = (PgVectorStore(app.state.sql) if s.in_postgres("vector")
+                                    else VectorStore(qdrant_url(s), qdrant_key(s, secret)))
                 made.append(app.state.vector)
             if "graph" in s.engines:
-                app.state.graph = (GraphStore(url=s.falkordb_url.get_secret_value()) if s.falkordb_url
-                                   else GraphStore(password=secret["falkordb_password"]))
+                if s.in_postgres("graph"):
+                    app.state.graph = AgeGraphStore(app.state.sql)
+                elif s.neo4j_url:
+                    app.state.graph = Neo4jGraphStore(
+                        s.neo4j_url, s.neo4j_user, s.neo4j_password.get_secret_value() if s.neo4j_password else "",
+                        s.neo4j_database)
+                else:
+                    app.state.graph = (GraphStore(url=s.falkordb_url.get_secret_value()) if s.falkordb_url
+                                       else GraphStore(password=secret["falkordb_password"]))
                 made.append(app.state.graph)
         app.state.keys = KeyStore(app.state.sql)
+        app.state.cluster = Cluster(app.state.sql, files=s.files, profile=s.profile, name=s.server_id,
+                                    fence_size=s.ingest_workers + 6)
+        app.state.keys.changed = lambda: app.state.cluster.notify("keys")
+        app.state.cluster.handlers.append(lambda ev: _on_cluster_event(app, ev))
+        await app.state.cluster.start()
         if (s.answer_model or s.llm_model) and app.state.answerer is None:
             app.state.answerer = Answerer(s.llm_url or "https://api.openai.com/v1", s.answer_model or s.llm_model,
                                           s.llm_api_key.get_secret_value() if s.llm_api_key else None)
@@ -149,6 +181,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
             yield
         preload.cancel()
         await app.state.backups.stop()
+        await app.state.cluster.stop()
         if starter:
             starter.cancel()
         if app.state.docs is not None:
@@ -171,6 +204,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     app.state.sql = app.state.vector = app.state.graph = app.state.docs = None
     app.state.docs_error = None
     app.state.keys = KeyStore((stores or {}).get("sql"))
+    app.state.cluster = Cluster(None, files=s.files, profile=s.profile)  # replaced on start when Postgres is there
     app.state.maintenance = None  # "snapshot" or "restore" while one runs
     app.state.answerer = None
     app.state.snapshots = Snapshots(app)
@@ -272,6 +306,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
             "tenant": c.tenant,
             "engines": {c: st.public() for c, st in m.status.items()},
             **({"sync": await _sync_stats(request.app)} if request.app.state.docs is not None else {}),
+            **({"cluster": request.app.state.cluster.status()} if request.app.state.sql is not None else {}),
         }
 
     @app.get("/metrics", include_in_schema=False)

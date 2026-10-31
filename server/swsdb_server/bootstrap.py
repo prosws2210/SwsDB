@@ -48,6 +48,7 @@ def render_pg_conf(s: Settings) -> str:
         "log_line_prefix = '[postgres] %m [%p] '",
         "log_timezone = 'UTC'",
         "timezone = 'UTC'",
+        *(["shared_preload_libraries = 'age'"] if s.in_postgres("graph") and "graph" in s.engines else []),
         "",
     ])
 
@@ -287,8 +288,10 @@ def run(s: Settings) -> None:
             if not f.is_file() or not os.access(f, os.R_OK):
                 raise BootstrapError(f"TLS file {f} is missing or unreadable (mount it read-only into the container)")
     exposed = " (native ports exposed)" if s.expose_native else ""
-    external = [c for c in engines if c not in local]
+    external = [c for c in engines if s.external(c) and not s.in_postgres(c)]
     note = f"; external: {', '.join(external)}" if external else ""
+    inside = [f"{c} ({s.product(c)})" for c in engines if s.in_postgres(c)]
+    note += f"; in PostgreSQL: {', '.join(inside)}" if inside else ""
     print(f"[swsdb] {__version__} starting with engines: {', '.join(local) or 'none'}{note}{exposed}", flush=True)
     if not s.api_key:
         print("[swsdb] WARNING: SWSDB_API_KEY is not set, so the API on port "

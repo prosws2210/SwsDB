@@ -104,6 +104,22 @@ in every run. On single-document questions it costs nothing. CI enforces both: g
     and more varied, entities than names alone, plus relations for 2-hop expansion. Measure on your own questions with
     [evaluation](guides/evaluation.md).
 
+### The lite profile
+
+The same dataset and floors with `SWSDB_PROFILE=lite` (pgvector and Apache AGE inside Postgres), from the CI quality
+gate's run on this machine. Quality matches the default profile; latency is similar.
+
+| Configuration (top 5, all questions) | Hit | Recall | MRR | nDCG | Answer found | p50 |
+|---|---|---|---|---|---|---|
+| default: hybrid | 1.000 | 0.989 | 0.989 | 0.976 | 0.977 | 58 ms |
+| lite: hybrid | 1.000 | 0.989 | 0.989 | 0.978 | 0.977 | 37 ms |
+| default: hybrid + graph | 1.000 | 1.000 | 0.989 | 0.981 | 1.000 | 55 ms |
+| lite: hybrid + graph | 1.000 | 1.000 | 0.989 | 0.983 | 1.000 | 44 ms |
+
+On the multi-hop questions both profiles give hybrid recall 0.929 and hybrid + graph 1.000. These latencies are the
+evaluation's own (one question at a time, embedding included), not the load test above. With an external Neo4j as the
+graph engine, `tests/image/test_neo4j.py` holds hybrid + graph to the same floors.
+
 ## Graph engine
 
 [ADR 0002](adr/0002-graph-engine-falkordb.md) measured two-hop expansion on the same data: FalkorDB 1.7 ms, Apache AGE

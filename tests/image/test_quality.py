@@ -32,11 +32,12 @@ FLOORS = {
 }
 
 
-@pytest.fixture(scope="module")
-def report():
+@pytest.fixture(scope="module", params=["default", "lite"])
+def report(request):
+    """The same floors for both profiles: the lite one (pgvector + AGE in Postgres) is offered only if it holds."""
     data = json.loads(DATASET.read_text(encoding="utf-8"))
     vol = f"swsdb-quality-{uuid.uuid4().hex[:8]}"
-    b = Box(vol, {"SWSDB_API_KEY": ADMIN})
+    b = Box(vol, {"SWSDB_API_KEY": ADMIN, "SWSDB_PROFILE": request.param})
     b.start()
     try:
         b.wait_ready()
@@ -70,9 +71,12 @@ def report():
                 "hybrid@1+graph1": kb.evaluate("multihop", k=1, configs=[
                     {"name": "hybrid+graph", "mode": "hybrid", "graph_hops": 1, "graph_k": 1}])}
         out["multihop_equal_evidence"] = {name: r["results"][0]["metrics"] for name, r in same.items()}
-        out["dataset"] = {"documents": len(data["documents"]), "questions": len(cases), "k": K}
+        out["dataset"] = {"documents": len(data["documents"]), "questions": len(cases), "k": K,
+                          "profile": request.param}
         if path := os.environ.get("SWSDB_QUALITY_REPORT"):
-            Path(path).write_text(json.dumps(out, indent=2), encoding="utf-8")
+            p = Path(path)
+            p = p if request.param == "default" else p.with_name(f"{p.stem}-{request.param}{p.suffix}")
+            p.write_text(json.dumps(out, indent=2), encoding="utf-8")
         print_table(out)
         yield out
     finally:
@@ -81,7 +85,7 @@ def report():
 
 
 def print_table(out: dict) -> None:
-    print("\nmultihop at equal evidence size")
+    print(f"\nprofile {out['dataset']['profile']}: multihop at equal evidence size")
     for name, m in out["multihop_equal_evidence"].items():
         print(f"  {name:<16} recall {m['recall']:.3f}  evidence {m['evidence']}  "
               f"answer {m.get('answer_found', 0):.3f}")

@@ -15,6 +15,7 @@ from .auth import Caller
 from .documents import Documents
 from .evaluate import Evaluator
 from .names import DEFAULT_TENANT, NameError_, check, engine_name
+from .neo4j import refuse_pass_through
 from .stores import (
     GraphStore,
     NotFound,
@@ -191,7 +192,9 @@ class Engines:
         self.monitor = request.app.state.monitor
 
     def need(self, cap: str):
-        names = {"sql": "SQL (PostgreSQL)", "vector": "vector (Qdrant)", "graph": "graph (FalkorDB)"}
+        shown = {"postgres": "PostgreSQL", "qdrant": "Qdrant", "falkordb": "FalkorDB", "pgvector": "pgvector",
+                 "age": "Apache AGE", "neo4j": "Neo4j"}
+        names = {c: f"{'SQL' if c == 'sql' else c} ({shown[self.s.product(c)]})" for c in ("sql", "vector", "graph")}
         if cap not in self.s.engines:
             raise HTTPException(409, f"the {names[cap]} engine is not enabled in this swsdb "
                                      f"(SWSDB_ENGINES={','.join(self.s.engines)})")
@@ -255,11 +258,17 @@ def router(caller) -> APIRouter:
             raise HTTPException(403, f"this key belongs to tenant {c.tenant!r} and can't reach tenant {t!r}")
         return t
 
-    def writable(request: Request) -> None:
-        """Writes that go straight to the vector or graph store wait while a snapshot copies them."""
+    def not_in_maintenance(request: Request) -> None:
         if request.app.state.maintenance:
             raise HTTPException(503, f"a {request.app.state.maintenance} is running; this write can be retried in a "
                                      "few seconds")
+
+    async def writable(request: Request):
+        """Writes that go straight to the vector or graph store are refused while a snapshot copies them, on this
+        server or (through the shared fence) on any other."""
+        not_in_maintenance(request)
+        async with request.app.state.cluster.changing(wait=False):
+            yield
 
     def global_admin(c: Caller = Depends(caller)) -> Caller:
         if c.role != "admin" or not c.is_global:
@@ -321,8 +330,7 @@ def router(caller) -> APIRouter:
             except NotFound:
                 pass
         if e.has("graph") and await e.graph.exists(key):
-            res = await e.graph.query(key, "MATCH (n) RETURN count(n)", None, read_only=True, timeout_s=10)
-            out["graph"] = {"nodes": res["rows"][0][0]}
+            out["graph"] = {"nodes": await e.graph.count_nodes(key)}
         docs = e.app.state.docs
         if e.has("sql") and docs and await docs.is_document_collection(t, name):
             coll = await docs.collection(t, name)
@@ -353,6 +361,7 @@ def router(caller) -> APIRouter:
                 removed["vector"] = False
         if e.has("graph"):
             removed["graph"] = await e.graph.drop(key)
+            await e.app.state.cluster.notify("graphs")  # other servers drop what they remember of it
         if e.has("sql") and e.app.state.docs:
             removed["documents"] = await e.app.state.docs.drop_collection(t, name)
         if not any(removed.values()):
@@ -393,15 +402,19 @@ def router(caller) -> APIRouter:
                      t: str = Depends(tenant), e: Engines = Depends(), role: str = Depends(require_key)):
         if role != "admin" and not body.read_only:
             raise HTTPException(403, "the read-only key can only run read_only queries")
-        if not body.read_only:
-            writable(request)
         check_pass_through_cypher(body.query)
         key = engine_name(t, name)
         g = e.graph
+        if not g.pass_through:
+            refuse_pass_through()
         if not await g.exists(key):
             raise NotFound(f"collection {name!r} has no graph (create it with graph: true)")
         await documents_guard(t, name, e, role, "Cypher")
-        return await g.query(key, body.query, body.params, read_only=body.read_only, timeout_s=body.timeout_s)
+        if body.read_only:
+            return await g.query(key, body.query, body.params, read_only=True, timeout_s=body.timeout_s)
+        not_in_maintenance(request)
+        async with request.app.state.cluster.changing(wait=False):
+            return await g.query(key, body.query, body.params, read_only=False, timeout_s=body.timeout_s)
 
     # -------------------------------------------------------------- documents
 
@@ -669,9 +682,9 @@ def router(caller) -> APIRouter:
             return out.setdefault(t, {"tenant": t, "collections": set(), "documents": 0, "keys": 0, "sql": False})
         names = []
         if e.has("vector"):
-            names += [x["name"] for x in (await e.vector._call("GET", "/collections"))["result"]["collections"]]
+            names += await e.vector.all_names()
         if e.has("graph"):
-            names += [g.decode() if isinstance(g, bytes) else g for g in await e.graph._cmd("GRAPH.LIST")]
+            names += await e.graph.all_names()
         for n in names:
             if n.startswith("sw_") and "__" in n:
                 t, coll = n[3:].split("__", 1)

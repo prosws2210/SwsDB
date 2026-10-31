@@ -22,6 +22,9 @@ jobs:
         run: |
           helm lint deploy/helm/swsdb --set apiKey.value=ci
           helm template ci deploy/helm/swsdb --set apiKey.value=ci --set ingress.enabled=true > /dev/null
+          helm template ci deploy/helm/swsdb --set apiKey.value=ci --set replicas=2 --set profile=lite \
+            --set externalEngines.existingSecret=engines | grep -q "value: postgres"
+          ! helm template ci deploy/helm/swsdb --set apiKey.value=ci --set replicas=2 2>/dev/null  # needs external engines
           ! helm template ci deploy/helm/swsdb 2>/dev/null   # refuses to render without an API key
 
   typescript:

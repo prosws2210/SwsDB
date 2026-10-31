@@ -55,7 +55,7 @@ nav:
       - Webhooks: guides/webhooks.md
       - Security and tenants: guides/security.md
       - Snapshots, restore and upgrades: guides/backups.md
-      - Deployment (Compose, Kubernetes, managed engines): guides/deployment.md
+      - "Deployment (Compose, Kubernetes, lite, several servers)": guides/deployment.md
       - Operations: guides/operations.md
   - Reference:
       - Configuration: reference/configuration.md
@@ -71,7 +71,7 @@ nav:
       - "ADR 0003: consistency model": adr/0003-consistency-model.md
       - "ADR 0004: tenants, keys and the SQL sandbox": adr/0004-tenant-isolation.md
       - "ADR 0005: snapshots": adr/0005-snapshots.md
-      - "ADR 0006: availability and replication": adr/0006-availability.md
+      - "ADR 0006: availability and several servers": adr/0006-availability.md
       - "ADR 0007: Neo4j and the lite profile": adr/0007-other-graph-engines.md
 
 exclude_docs: |

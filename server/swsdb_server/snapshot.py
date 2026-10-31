@@ -8,6 +8,8 @@ A snapshot is a single tar file:
     graph/<key>.dump     one FalkorDB DUMP per graph
     files/...            the uploaded originals (documents still waiting to be processed need them)
 
+With SWSDB_PROFILE=lite the vectors and graphs are tables in the swsdb database, so postgres.dump holds them too.
+
 Consistency: Postgres is dumped from one MVCC snapshot, so it is consistent on its own. The vector and graph stores
 are derived from it by the outbox workers, so they are paused (finishing what they hold) and writes that touch those
 stores directly are refused for the few seconds the copy takes. Every store is then copied at the same point.
@@ -134,7 +136,8 @@ class Snapshots:
         t0 = time.monotonic()
         manifest: dict[str, Any] = {
             "format": FORMAT, "name": name, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "swsdb_version": __version__, "data_format": DATA_FORMAT, "engines": {}, "migrations": None,
+            "swsdb_version": __version__, "data_format": DATA_FORMAT, "profile": self.s.profile, "engines": {},
+            "migrations": None,
             "sql_tenants": [], "vector_collections": [], "graphs": [], "documents": 0,
         }
         for cap, es in st.monitor.status.items():
@@ -142,10 +145,14 @@ class Snapshots:
         docs = st.docs
         st.maintenance = "snapshot"
         paused = False
+        fence = st.cluster.exclusive()
+        fenced = False
         try:
             if docs is not None:
                 await docs.sync.pause()
                 paused = True
+            await fence.__aenter__()  # other servers' changes in flight finish; new ones wait
+            fenced = True
             if st.sql is not None:
                 await st.sql.migrate()
                 args, env = st.sql.tool_args()
@@ -154,15 +161,19 @@ class Snapshots:
                 manifest["sql_tenants"] = [r["role"] for r in await st.sql.rows(
                     "SELECT role FROM swsdb.sql_tenants ORDER BY role")]
                 manifest["documents"] = (await st.sql.rows("SELECT count(*) AS n FROM swsdb.documents"))[0]["n"]
-            if st.vector is not None:
+            if st.vector is not None and st.vector.in_postgres:
+                manifest["vector_collections"] = await st.vector.all_names()  # in postgres.dump
+            elif st.vector is not None:
                 (work / "qdrant").mkdir()
                 for c in await self._vector_names():
                     await self._vector_snapshot(c, work / "qdrant" / f"{c}.snapshot")
                     manifest["vector_collections"].append(c)
-            if st.graph is not None:
+            if st.graph is not None and st.graph.in_postgres:
+                manifest["graphs"] = await st.graph.all_names()
+            elif st.graph is not None:
                 (work / "graph").mkdir()
                 for g in await self._graph_names():
-                    data = await st.graph.r.dump(g)
+                    data = await st.graph.dump(g)
                     if data is not None:
                         (work / "graph" / f"{g}.dump").write_bytes(data)
                         manifest["graphs"].append(g)
@@ -172,6 +183,8 @@ class Snapshots:
             final.unlink(missing_ok=True)
             raise
         finally:
+            if fenced:
+                await fence.__aexit__(None, None, None)
             if paused:
                 docs.sync.resume()
             st.maintenance = None
@@ -193,12 +206,10 @@ class Snapshots:
         os.replace(tmp, final)
 
     async def _vector_names(self) -> list[str]:
-        r = await self.app.state.vector._call("GET", "/collections")
-        return sorted(c["name"] for c in r["result"]["collections"] if c["name"].startswith(ENGINE_PREFIX))
+        return [n for n in await self.app.state.vector.all_names() if n.startswith(ENGINE_PREFIX)]
 
     async def _graph_names(self) -> list[str]:
-        names = [n.decode() if isinstance(n, bytes) else n for n in await self.app.state.graph._cmd("GRAPH.LIST")]
-        return sorted({n for n in names if n.startswith(ENGINE_PREFIX)})
+        return sorted({n for n in await self.app.state.graph.all_names() if n.startswith(ENGINE_PREFIX)})
 
     async def _vector_snapshot(self, name: str, out: Path) -> None:
         v = self.app.state.vector
@@ -226,6 +237,11 @@ class Snapshots:
         if (m.get("migrations") or 0) > len(MIGRATIONS):
             problems.append(f"its database schema ({m['migrations']}) is newer than this swsdb ({len(MIGRATIONS)})")
         st = self.app.state
+        theirs_profile = m.get("profile") or "default"
+        if theirs_profile != self.s.profile:
+            problems.append(f"it was taken with SWSDB_PROFILE={theirs_profile} and this swsdb runs {self.s.profile}: "
+                            "the vectors and graphs are stored differently (start this image with the snapshot's "
+                            "profile, or move the data through the API)")
         here = {cap: es.version for cap, es in st.monitor.status.items()}
         if m.get("migrations") is not None and st.sql is None:
             problems.append("it holds PostgreSQL data but this swsdb runs without the sql engine")
@@ -234,6 +250,12 @@ class Snapshots:
         if m.get("graphs") and st.graph is None:
             problems.append("it holds graphs but this swsdb runs without the graph engine")
         for cap in ("vector", "graph"):
+            made_by = (m.get("engines") or {}).get(cap, {}).get("engine")
+            serving = st.monitor.status[cap].engine if cap in st.monitor.status else None
+            if made_by and serving and made_by != serving and (m.get("graphs" if cap == "graph" else
+                                                                         "vector_collections")):
+                problems.append(f"its {cap} data was copied from {made_by} and this swsdb uses {serving}")
+                continue
             theirs = (m.get("engines") or {}).get(cap, {}).get("version")
             if theirs and here.get(cap) and _version_tuple(theirs) > _version_tuple(here[cap]):
                 problems.append(f"it was taken with {cap} engine {theirs}, newer than this one ({here[cap]})")
@@ -261,17 +283,26 @@ class Snapshots:
         docs = st.docs
         if docs is not None:
             await docs.sync.stop()
+        fence = st.cluster.exclusive()
+        fenced = False
         try:
+            await fence.__aenter__()
+            fenced = True
             await asyncio.to_thread(self._unpack, self.path(sid), work)
             if st.sql is not None and (work / "postgres.dump").is_file():
                 await self._restore_postgres(work / "postgres.dump", m.get("sql_tenants") or [])
-            if st.vector is not None:
+            if st.vector is not None and not st.vector.in_postgres:
                 await self._restore_vectors(work / "qdrant", m.get("vector_collections") or [])
-            if st.graph is not None:
+            if st.graph is not None and not st.graph.in_postgres:
                 await self._restore_graphs(work / "graph", m.get("graphs") or [])
+            if st.graph is not None and st.graph.in_postgres:
+                st.graph.forget()  # restored with the dump; drop what this process remembered of the old one
             await asyncio.to_thread(self._restore_files, work / "files")
             st.keys._rows = None  # the restored database has its own keys
+            await st.cluster.notify("reset")  # and every other server must forget what it cached of the old one
         finally:
+            if fenced:
+                await fence.__aexit__(None, None, None)
             shutil.rmtree(work, ignore_errors=True)
             if docs is not None:
                 await docs.sync.start()
@@ -336,7 +367,7 @@ class Snapshots:
         for key in await self._graph_names():
             await g.drop(key)
         for key in names:
-            await g.r.restore(key, 0, (folder / f"{key}.dump").read_bytes(), replace=True)
+            await g.restore(key, (folder / f"{key}.dump").read_bytes())
 
     def _restore_files(self, folder: Path) -> None:
         target = self.s.files_dir

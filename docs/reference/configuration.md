@@ -31,12 +31,17 @@ Keep secrets out of the file: use the `_FILE` variables for them.
 | `SWSDB_API_KEY` † | unset | admin key for every tenant. Unset (and no managed keys): the API is open, for local use |
 | `SWSDB_READ_ONLY_API_KEY` † | unset | read-only key for every tenant |
 | `SWSDB_ENGINES` | all | which engines run: any of `sql`, `vector`, `graph` (or `postgres`, `qdrant`, `falkordb`) |
+| `SWSDB_PROFILE` | `default` | `default`: Qdrant and FalkorDB beside Postgres. `lite`: vectors (pgvector) and graphs (Apache AGE) inside Postgres, which is then the only engine ([deployment](../guides/deployment.md#lite-profile)) |
+| `SWSDB_FILES` | `disk` | where uploads wait to be processed: `disk` (this server's volume) or `postgres` (needed to [run several servers](../guides/deployment.md#several-servers)) |
+| `SWSDB_SERVER_ID` | host name | this server's name among several (status, outbox claims) |
 | `SWSDB_PORT` | `6464` | API port inside the container |
 | `SWSDB_TLS_CERT_FILE`, `SWSDB_TLS_KEY_FILE` | unset | serve HTTPS with this certificate and key (both or neither) |
 | `SWSDB_ALLOWED_HOSTS` | empty | comma-separated host names (and browser origins' hosts) accepted besides localhost, IP addresses and the container's hostname |
 | `SWSDB_POSTGRES_URL` † | unset | use this PostgreSQL instead of the bundled one ([deployment](../guides/deployment.md)) |
 | `SWSDB_QDRANT_URL`, `SWSDB_QDRANT_API_KEY` † | unset | use this Qdrant instead of the bundled one |
 | `SWSDB_FALKORDB_URL` † | unset | use this FalkorDB instead of the bundled one (`redis://` or `rediss://`) |
+| `SWSDB_NEO4J_URL` | unset | use this Neo4j (5.19 or later, HTTP port) as the graph engine instead ([deployment](../guides/deployment.md#neo4j)) |
+| `SWSDB_NEO4J_USER`, `SWSDB_NEO4J_PASSWORD` †, `SWSDB_NEO4J_DATABASE` | `neo4j`, unset, `neo4j` | its login and database |
 | `SWSDB_EXPOSE_NATIVE` | `false` | make the engines' own ports (5432, 6333, 6379) listen beyond localhost |
 | `SWSDB_CONFIG_FILE` | `/swsdb/config/swsdb.yaml` | settings file (see above) |
 | `SWSDB_LOG_LEVEL` | `info` | `debug`, `info`, `warning` or `error` |

@@ -27,6 +27,18 @@ ALIASES = {
 }
 
 
+# SWSDB_PROFILE=lite: vectors and graphs live in PostgreSQL (pgvector, Apache AGE), so Postgres is the only process
+LITE_PRODUCTS = {"vector": "pgvector", "graph": "age"}
+PROFILES = ("default", "lite")
+
+
+def product(cap: str, profile: str = "default") -> str:
+    """What serves a capability in a profile."""
+    if profile == "lite" and cap in LITE_PRODUCTS:
+        return LITE_PRODUCTS[cap]
+    return ENGINES[cap].product
+
+
 class EngineSelectionError(ValueError):
     pass
 

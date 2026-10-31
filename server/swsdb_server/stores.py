@@ -163,6 +163,16 @@ MIGRATIONS: list[str] = [
     """
     CREATE TABLE swsdb.sql_role_secrets (role text PRIMARY KEY, password text NOT NULL);
     """,
+    # 8: several servers on one database: who is running, who holds an outbox row, uploads kept in Postgres
+    """
+    CREATE TABLE swsdb.servers (
+      id text PRIMARY KEY, version text NOT NULL, files text NOT NULL, profile text NOT NULL,
+      started_at timestamptz NOT NULL DEFAULT now(), seen_at timestamptz NOT NULL DEFAULT now());
+    ALTER TABLE swsdb.outbox ADD COLUMN locked_by text;
+    CREATE TABLE swsdb.originals (
+      document_id uuid NOT NULL REFERENCES swsdb.documents (id) ON DELETE CASCADE,
+      version int NOT NULL, data bytea NOT NULL, PRIMARY KEY (document_id, version));
+    """,
 ]
 
 TENANT_ROLE_PREFIX = "swsdb_t_"  # bootstrap's pg_ident map lets the server log in as any role with this prefix
@@ -228,14 +238,16 @@ async def _reset_session(conn) -> None:
 class SqlStore:
     MAX_TENANT_POOLS = 32
 
-    def __init__(self, socket_dir: str | None, dbname: str = "swsdb", max_size: int = 10, dsn: str | None = None):
+    def __init__(self, socket_dir: str | None, dbname: str = "swsdb", max_size: int = 10, dsn: str | None = None,
+                 own_pool: int = 4):
         """The bundled Postgres over its Unix socket (`socket_dir`), or an external one (`dsn`, whose user owns the
         database and may create roles)."""
         self.dsn = dsn
         self.socket_dir = socket_dir
         self.dbname = (psycopg.conninfo.conninfo_to_dict(dsn).get("dbname") or dbname) if dsn else dbname
-        self.pool = AsyncConnectionPool(conninfo=self._conninfo(None), min_size=0, max_size=4, open=False,
+        self.pool = AsyncConnectionPool(conninfo=self._conninfo(None), min_size=0, max_size=own_pool, open=False,
                                         kwargs={"autocommit": True})  # swsdb's own work: migrations, catalog
+        self.setup: list[str] = []  # DDL the lite stores need, applied after the migrations (idempotent)
         self._passwords: dict[str, str] = {}
         self._max_size = max_size
         self._tenant_pools: dict[str, AsyncConnectionPool] = {}  # role -> pool, most recently used last
@@ -386,7 +398,17 @@ class SqlStore:
                 if version not in done:
                     await conn.execute(ddl)
                     await conn.execute("INSERT INTO swsdb.migrations (version) VALUES (%s)", [version])
+            for ddl in self.setup:
+                try:
+                    await conn.execute(ddl)
+                except psycopg.errors.InsufficientPrivilege as e:
+                    raise StoreError(f"the lite profile needs the vector and age extensions in this database, and "
+                                     f"creating them needs a superuser: {e}") from e
         self._migrated = True
+
+    def add_setup(self, ddl: str) -> None:
+        if ddl not in self.setup:
+            self.setup.append(ddl)
 
     def forget(self) -> None:
         """The database was replaced (restore): migrate again and recreate tenant roles and pools on next use."""
@@ -464,6 +486,9 @@ def _qdrant_filter(where: dict[str, Any] | None) -> dict | None:
 
 
 class VectorStore:
+    in_postgres = False  # the lite profile's pgvector store says True: it is copied with the Postgres dump
+    engine = "qdrant"
+
     def __init__(self, url: str, api_key: str):
         # identity: Qdrant otherwise gzips every reply httpx asks it to, which costs ~40 ms per search on loopback
         self.http = httpx.AsyncClient(base_url=url, timeout=30.0,
@@ -488,9 +513,12 @@ class VectorStore:
             raise StoreError(body.get("status", {}).get("error", f"Qdrant answered {r.status_code}"))
         return body
 
+    async def all_names(self) -> list[str]:
+        """Every collection in the engine, swsdb's or not."""
+        return sorted(c["name"] for c in (await self._call("GET", "/collections"))["result"]["collections"])
+
     async def list(self, tenant: str) -> list[str]:
-        cols = (await self._call("GET", "/collections"))["result"]["collections"]
-        return sorted(n for c in cols if (n := parse_engine_name(c["name"], tenant)))
+        return sorted(n for c in await self.all_names() if (n := parse_engine_name(c, tenant)))
 
     async def create(self, name: str, spec: VectorSpec) -> None:
         if spec.distance not in DISTANCES:
@@ -730,6 +758,10 @@ def _typed(cell: list, schema: tuple[list[str], list[str], list[str]]) -> Any:
 
 
 class GraphStore:
+    in_postgres = False
+    engine = "falkordb"
+    pass_through = True  # Cypher from API callers runs (each collection is its own graph)
+
     def __init__(self, host: str = "127.0.0.1", port: int = 6379, password: str | None = None,
                  url: str | None = None):
         """The bundled FalkorDB, or an external one by `url` (redis://:password@host:6379, rediss:// for TLS)."""
@@ -740,9 +772,37 @@ class GraphStore:
     async def close(self) -> None:
         await self.r.aclose()
 
+    async def all_names(self) -> list[str]:
+        return sorted(_decode(g) for g in await self._cmd("GRAPH.LIST"))
+
+    def forget(self) -> None:
+        self._schemas.clear()
+
+    async def count_nodes(self, name: str) -> int:
+        return (await self.query(name, "MATCH (n) RETURN count(n)", None, read_only=True, timeout_s=10))["rows"][0][0]
+
+    async def dump(self, name: str) -> bytes | None:
+        """The graph as one value (Redis DUMP), for snapshots."""
+        return await self.r.dump(name)
+
+    async def restore(self, name: str, data: bytes) -> None:
+        await self.r.restore(name, 0, data, replace=True)
+        self._schemas.pop(name, None)
+
     async def list(self, tenant: str) -> list[str]:
-        names = await self._cmd("GRAPH.LIST")
-        return sorted(n for g in names if (n := parse_engine_name(_decode(g), tenant)))
+        return sorted(n for g in await self.all_names() if (n := parse_engine_name(g, tenant)))
+
+    async def index(self, name: str, label: str, prop: str) -> None:
+        try:
+            await self.query(name, f"CREATE INDEX FOR (x:{label}) ON (x.{prop})", None, read_only=False,
+                             timeout_s=30)
+        except StoreError as e:
+            if "already indexed" not in str(e).lower():
+                raise
+
+    async def delete_orphan_entities(self, name: str) -> None:
+        await self.query(name, "MATCH (e:Entity) WHERE NOT (e)<-[:MENTIONS]-() DETACH DELETE e", None,
+                         read_only=False, timeout_s=120)
 
     async def _cmd(self, *args):
         try:

@@ -86,6 +86,10 @@ class Backups:
             state = self._load()
             due = (state.get("last_success_epoch") or 0) + self.s.backup_interval_h * 3600
             wait = due - time.time()
+            cluster = getattr(self.app.state, "cluster", None)
+            if cluster is not None and not cluster.leader:  # several servers: the leader takes the backups
+                await asyncio.sleep(60)
+                continue
             if wait > 0:
                 await asyncio.sleep(min(wait, 3600))
                 continue

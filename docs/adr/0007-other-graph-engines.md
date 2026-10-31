@@ -1,51 +1,59 @@
-# ADR 0007: Neo4j and the Postgres-only "lite" profile: designed, not shipped in v0.1
+# ADR 0007: Neo4j and the Postgres-only lite profile
 
-Status: accepted (deferred) · Date: 2026-10-31
+Status: accepted · Date: 2026-10-31 · Updated: 2026-10-31 (both implemented)
 
 ## Context
 
 PLAN.md's Phase 7 lists a Neo4j adapter (an existing Neo4j as the graph engine) and an AGE "lite" profile (Postgres
 alone, for small machines). The engine adapters (`SqlStore`, `VectorStore`, `GraphStore`) were built so engines can
-change. While implementing Phase 7, both turned out to need more than an adapter. Shipping them half-done would weaken
-the two guarantees swsdb leads with: tenant isolation and consistency.
+change. Both turned out to need more than an adapter. Neither may weaken the two guarantees swsdb leads with: tenant
+isolation and consistency.
 
-## What each needs
+## Lite profile: `SWSDB_PROFILE=lite`
 
-**Neo4j (external).** swsdb gives every collection its own graph. That is what makes pass-through Cypher safe: a query
-can't name another collection's graph (ADR 0004). Neo4j Community has one user database:
+Swapping FalkorDB for Apache AGE alone saves little memory (FalkorDB idles at 31 MB); Qdrant and the embedding model
+are what a small machine notices. So the lite profile moves vectors into Postgres too (`server/swsdb_server/lite.py`):
 
-- Every collection would share it.
-- Isolation would depend on rewriting user Cypher.
-- That is a security boundary built on parsing, which swsdb deliberately avoids.
+- **Vectors:** one table per collection in the `swsdb_lite` schema, which no tenant role can read. Dense vectors use
+  pgvector with HNSW (iterative scans, so filters don't starve results). BM25 keywords use an inverted index
+  `(term, point, weight)`, scored with the IDF formula Qdrant applies. Hybrid search fuses the two rankings with RRF.
+  Qdrant-style filters become JSONB containment, which the GIN index serves.
+- **Graphs:** one AGE graph per collection, owned by the tenant's sandbox role, and every Cypher query runs as that
+  role. AGE lets Cypher call Postgres functions, so this matters. A query can't reach another tenant's graph: the
+  boundary is Postgres permissions, not query parsing. Queries go in dollar quotes with a tag derived from the query
+  (they can't close them), and the column list AGE needs is read from the final `RETURN`. A wrong count can only
+  make Postgres refuse the query. Writes to one graph are serialized with an advisory lock, so MERGE and the orphan
+  clean-up are as safe as FalkorDB's atomic queries.
+- **Snapshots:** everything is in `pg_dump`. AGE identifies a graph by its schema's OID, which a restore changes, so
+  every start and restore re-points AGE's catalog (an idempotent step).
 
-With Neo4j Enterprise or Aura (several databases), a collection maps to a database (names allow letters, digits, `.`
-and `-`, so `sw_acme__kb` becomes `sw-acme--kb`). The adapter then needs:
+**Done means:** the security suite and the retrieval quality gate run on both profiles in CI, and lite meets the same
+floors (it measured the same recall and answer rates as the default profile on the benchmark set). Lite needs
+nothing under SSPL, which also removes the licensing blocker for a hosted offering (decision L1).
 
-- Bolt queries with native parameters;
-- the expansion and graph-write Cypher, which is portable apart from FalkorDB's `CYPHER` header;
-- snapshots through `neo4j-admin database dump`, which needs the database stopped or online backup (Enterprise),
-  instead of `DUMP`/`RESTORE` per key;
-- a schema-aware result decoder.
+## Neo4j: `SWSDB_NEO4J_URL`
 
-**Decision: support Neo4j only with multi-database (Enterprise, Aura Business), as a separate adapter with its own
-test suite.** Pass-through Cypher on a shared database stays refused.
+swsdb gives every collection its own graph; that is what makes pass-through Cypher safe (ADR 0004). Neo4j Community
+has one user database. The adapter (`server/swsdb_server/neo4j.py`, over the HTTP Query API) therefore runs in a
+**shared-database mode**:
 
-**AGE "lite".** Swapping FalkorDB for Apache AGE is small: AGE speaks Cypher inside Postgres. But it is 70x slower at
-two-hop expansion (ADR 0002), and it saves only ~30 MB, because FalkorDB idles at 31 MB. The memory a small machine
-needs comes from Qdrant and the embedding model. A real "lite" profile therefore means vectors in Postgres too
-(pgvector). That needs:
+- Every node a collection owns carries the collection's label (`C_<hash>`). swsdb's own queries are fixed strings
+  in the server, and their Document, Chunk and Entity patterns are scoped to that label. Entity keys have a
+  uniqueness constraint per collection.
+- Writes lock the collection's registry node first, so one writer at a time per collection.
+- **Pass-through Cypher is refused** (403): keeping a user's query inside one collection would need rewriting it, and
+  that is a security boundary built on parsing. Graph-backed retrieval, reconciliation and snapshots (JSON export of
+  the collection's subgraph) work, and retrieval meets the quality floors (`tests/image/test_neo4j.py`).
 
-- a `VectorStore` over pgvector that implements what retrieval asks of Qdrant: dense search with payload filters,
-  sparse BM25 search with IDF weighting, reciprocal-rank fusion, has-id filters for graph expansion, and paging scans
-  for reconciliation;
-- a migration between profiles (re-embed or copy vectors).
-
-**Decision: build it as `SWSDB_PROFILE=lite` = Postgres + pgvector (dense and `sparsevec`) + AGE.** Retrieval quality
-must pass the same CI gate as the default profile before it is offered. Until then the default profile is the
-supported one, and `SWSDB_ENGINES=sql,vector` already runs without a graph engine.
+**Not done:** a database per collection on Neo4j Enterprise or Aura, which would allow pass-through Cypher there. It
+needs an Enterprise license to test, so it stays on the roadmap. Database names allow letters, digits, `.` and `-`,
+so `sw_acme__kb` would become `sw-acme--kb`.
 
 ## Consequences
 
-- v0.1 supports FalkorDB as the graph engine, bundled or external (`SWSDB_FALKORDB_URL`).
-- Both adapters stay on the roadmap with the scope above; the quality gate and the security suite define "done" for
-  each.
+- Graph engines: FalkorDB (bundled or external, default), Apache AGE (lite profile), Neo4j (external, retrieval
+  only).
+- The default profile stays the recommended one for large graphs: ADR 0002 measured FalkorDB much faster than AGE at
+  multi-hop expansion.
+- A snapshot restores only into the profile and graph engine it was taken with; moving between them goes through the
+  API.

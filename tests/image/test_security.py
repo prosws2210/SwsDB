@@ -28,8 +28,9 @@ ADMIN, READ = "root-admin-key-from-a-file", "root-read-key-from-a-file"
 ACME, GLOBEX = "ALPHA-7731", "OMEGA-9902"
 
 
-@pytest.fixture(scope="module")
-def box(tmp_path_factory):
+@pytest.fixture(scope="module", params=["default", "lite"])
+def box(request, tmp_path_factory):
+    """Every test runs on both profiles: the lite one keeps vectors and graphs in Postgres, behind the same API."""
     tag = uuid.uuid4().hex[:8]
     net, vol, llm = f"swsdb-net-{tag}", f"swsdb-sec-{tag}", f"swsdb-llm-{tag}"
     secrets = tmp_path_factory.mktemp("secrets")
@@ -40,7 +41,7 @@ def box(tmp_path_factory):
     sh("docker", "run", "-d", "--name", llm, "--network", net, "--network-alias", "llm",
        "python:3.12-slim-trixie", "python", "-c", FAKE_LLM)
     b = Box(vol, {"SWSDB_API_KEY_FILE": "/run/secrets/admin", "SWSDB_READ_ONLY_API_KEY_FILE": "/run/secrets/read",
-                  "SWSDB_LLM_URL": "http://llm:8000/v1", "SWSDB_LLM_MODEL": "stand-in"},
+                  "SWSDB_LLM_URL": "http://llm:8000/v1", "SWSDB_LLM_MODEL": "stand-in", "SWSDB_PROFILE": request.param},
             extra=["--network", net, "-v", f"{secrets}:/run/secrets:ro"])
     b.start()
     try:

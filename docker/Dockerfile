@@ -49,6 +49,15 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}"; \
     rm -rf /var/lib/apt/lists/* /var/lib/postgresql/* /usr/share/doc/* /usr/share/man/*
 
+# The lite profile's extensions (SWSDB_PROFILE=lite): pgvector (PostgreSQL License) and Apache AGE (Apache-2.0)
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}-pgvector" "postgresql-${PG_MAJOR}-age"; \
+    install -d /opt/swsdb/licenses; \
+    cp "/usr/share/doc/postgresql-${PG_MAJOR}-pgvector/copyright" /opt/swsdb/licenses/pgvector.copyright; \
+    cp "/usr/share/doc/postgresql-${PG_MAJOR}-age/copyright" /opt/swsdb/licenses/apache-age.copyright; \
+    rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
+
 # s6-overlay, checksum-verified
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; *) echo "unsupported arch ${TARGETARCH}"; exit 1 ;; esac; \

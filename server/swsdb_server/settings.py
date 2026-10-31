@@ -11,12 +11,12 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
-from .engines import parse_engines
+from .engines import LITE_PRODUCTS, PROFILES, EngineSelectionError, parse_engines, product
 
 # Secrets can come from files instead (Docker and Kubernetes secrets): SWSDB_API_KEY_FILE=/run/secrets/swsdb_key.
 # Environment variables show up in `docker inspect`; mounted files don't.
 SECRET_FILES = ("API_KEY", "READ_ONLY_API_KEY", "LLM_API_KEY", "EMBEDDINGS_API_KEY", "BACKUP_S3_ACCESS_KEY",
-                "BACKUP_S3_SECRET_KEY", "POSTGRES_URL", "QDRANT_API_KEY", "FALKORDB_URL")
+                "BACKUP_S3_SECRET_KEY", "POSTGRES_URL", "QDRANT_API_KEY", "FALKORDB_URL", "NEO4J_PASSWORD")
 
 
 def secrets_from_files(environ: dict | None = None) -> None:
@@ -93,6 +93,8 @@ class Settings(BaseSettings):
         return init_settings, env_settings, _ConfigFile(settings_cls), file_secret_settings
 
     engines_raw: str = Field("", alias="SWSDB_ENGINES")
+    # default: Qdrant and FalkorDB beside Postgres; lite: vectors (pgvector) and graphs (Apache AGE) in Postgres
+    profile: str = "default"
     api_key: SecretStr | None = None
     read_only_api_key: SecretStr | None = None
     host: str = "0.0.0.0"
@@ -108,6 +110,12 @@ class Settings(BaseSettings):
     qdrant_url: str | None = None  # http://qdrant:6333 or https://xyz.cloud.qdrant.io:6333
     qdrant_api_key: SecretStr | None = None
     falkordb_url: SecretStr | None = None  # redis://:password@falkordb:6379 (rediss:// for TLS)
+    # or an existing Neo4j as the graph engine (HTTP Query API, Neo4j 5.19 or later): graph retrieval works, and
+    # pass-through Cypher is off because collections share one Neo4j database
+    neo4j_url: str | None = None  # http://neo4j:7474 or https://...
+    neo4j_user: str = "neo4j"
+    neo4j_password: SecretStr | None = None
+    neo4j_database: str = "neo4j"
     # HTTPS on the API port: mount a certificate and its key, e.g. -v ./tls:/tls:ro
     tls_cert_file: Path | None = None
     tls_key_file: Path | None = None
@@ -130,6 +138,10 @@ class Settings(BaseSettings):
     ingest_workers: int = Field(2, ge=1, le=32)
     reconcile_interval_s: float = Field(600, ge=0)  # compare catalog and stores this often (0: only on request)
     max_upload_mb: int = Field(100, ge=1, le=4096)
+    # where uploaded originals wait to be processed: disk (this server's volume) | postgres (shared by every server
+    # on the database: needed to run several servers)
+    files: str = "disk"
+    server_id: str | None = None  # this server's name among several (default: the host name)
 
     # scheduled backups: a snapshot every N hours (0: off), copied to S3-compatible storage when a bucket is set
     backup_interval_h: float = Field(0, ge=0)
@@ -145,6 +157,22 @@ class Settings(BaseSettings):
     @classmethod
     def _blank_secret(cls, v: object) -> object:
         return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("files")
+    @classmethod
+    def _files(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in {"disk", "postgres"}:
+            raise ValueError("SWSDB_FILES must be disk or postgres")
+        return v
+
+    @field_validator("profile")
+    @classmethod
+    def _profile(cls, v: str) -> str:
+        v = v.strip().lower() or "default"
+        if v not in PROFILES:
+            raise ValueError(f"SWSDB_PROFILE must be one of {', '.join(PROFILES)}")
+        return v
 
     @field_validator("entities")
     @classmethod
@@ -179,14 +207,26 @@ class Settings(BaseSettings):
             raise ValueError("SWSDB_LOG_LEVEL must be debug, info, warning or error")
         return v
 
+    def in_postgres(self, cap: str) -> bool:
+        """Whether a capability is served by PostgreSQL itself (the lite profile's vectors and graphs)."""
+        return self.profile == "lite" and cap in LITE_PRODUCTS
+
     def external(self, cap: str) -> bool:
         """Whether a capability's engine runs outside this container."""
-        return bool({"sql": self.postgres_url, "vector": self.qdrant_url, "graph": self.falkordb_url}.get(cap))
+        if self.in_postgres(cap):
+            return self.external("sql")
+        return bool({"sql": self.postgres_url, "vector": self.qdrant_url,
+                     "graph": self.falkordb_url or self.neo4j_url}.get(cap))
+
+    def product(self, cap: str) -> str:
+        if cap == "graph" and self.neo4j_url and self.profile != "lite":
+            return "neo4j"
+        return product(cap, self.profile)
 
     @property
     def local_engines(self) -> tuple[str, ...]:
-        """The engines this container runs itself."""
-        return tuple(c for c in self.engines if not self.external(c))
+        """The engine processes this container runs itself."""
+        return tuple(c for c in self.engines if not self.external(c) and not self.in_postgres(c))
 
     @property
     def allowed_hosts_list(self) -> list[str]:
@@ -205,7 +245,18 @@ class Settings(BaseSettings):
 
     @cached_property
     def engines(self) -> tuple[str, ...]:
-        return parse_engines(self.engines_raw)
+        chosen = parse_engines(self.engines_raw)
+        if self.profile == "lite":
+            if "sql" not in chosen:
+                raise EngineSelectionError("SWSDB_PROFILE=lite keeps vectors and graphs in PostgreSQL: SWSDB_ENGINES "
+                                           "must include sql")
+            if self.qdrant_url or self.falkordb_url or self.neo4j_url:
+                raise EngineSelectionError("SWSDB_PROFILE=lite keeps vectors and graphs in PostgreSQL: unset "
+                                           "SWSDB_QDRANT_URL, SWSDB_FALKORDB_URL and SWSDB_NEO4J_URL (or use the "
+                                           "default profile)")
+        if self.falkordb_url and self.neo4j_url:
+            raise EngineSelectionError("set SWSDB_FALKORDB_URL or SWSDB_NEO4J_URL, not both: there is one graph engine")
+        return chosen
 
     # where things live
     @property

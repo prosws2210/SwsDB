@@ -23,6 +23,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from . import observe
+from .cluster import Cluster
 from .embed import Embedder
 from .extract import Extractor, NameExtractor
 from .names import ID_NAMESPACE, engine_name
@@ -34,8 +35,7 @@ log = logging.getLogger("swsdb.documents")
 
 PUBLIC = "*"  # a reader entry meaning "everyone in the tenant"
 GRAPH_WEIGHTS = {"next": 0.30, "entity": 0.55, "relation": 0.40}  # expanded chunk score = seed score x weight
-GRAPH_INDEXES = ("CREATE INDEX FOR (d:Document) ON (d.id)", "CREATE INDEX FOR (c:Chunk) ON (c.id)",
-                 "CREATE INDEX FOR (e:Entity) ON (e.key)")
+GRAPH_INDEXES = (("Document", "id"), ("Chunk", "id"), ("Entity", "key"))
 
 
 def doc_uuid(tenant: str, collection: str, external_id: str) -> str:
@@ -75,6 +75,7 @@ class Documents:
                  embedder: Embedder, extractor: Extractor | NameExtractor | None):
         self.s, self.sql, self.vector, self.graph = s, sql, vector, graph
         self.embedder, self.extractor = embedder, extractor
+        self.cluster = Cluster(None, files=s.files, profile=s.profile)  # the app gives it the shared one
         from .sync import Sync
         self.sync = Sync(self)
 
@@ -94,6 +95,19 @@ class Documents:
     def file(self, tenant: str, collection: str, doc_id: str, version: int, kind: str) -> Path:
         return self.s.files_dir / tenant / collection / doc_id / f"v{version}{kind}"
 
+    async def original(self, doc: dict, version: int) -> bytes | None:
+        """The uploaded file of one version: in Postgres (SWSDB_FILES=postgres) or on this server's volume. Both are
+        looked at, so switching the setting doesn't strand documents still waiting."""
+        row = await self.one("SELECT data FROM swsdb.originals WHERE document_id = %s AND version = %s",
+                             [doc["id"], version])
+        if row is not None:
+            return bytes(row["data"])
+        path = self.file(doc["tenant"], doc["collection"], str(doc["id"]), version, doc["kind"])
+        try:
+            return await asyncio.to_thread(path.read_bytes)
+        except FileNotFoundError:
+            return None
+
     async def collection(self, tenant: str, name: str) -> dict:
         row = await self.one("SELECT * FROM swsdb.collections WHERE tenant = %s AND name = %s", [tenant, name])
         if row is None:
@@ -105,12 +119,8 @@ class Documents:
                                    [tenant, name]))
 
     async def ensure_graph_indexes(self, key: str) -> None:
-        for idx in GRAPH_INDEXES:
-            try:
-                await self.graph.query(key, idx, None, read_only=False, timeout_s=30)
-            except StoreError as e:
-                if "already indexed" not in str(e).lower():
-                    raise
+        for label, prop in GRAPH_INDEXES:
+            await self.graph.index(key, label, prop)
 
     async def create_collection(self, tenant: str, name: str, graph: bool) -> dict:
         if await self.one("SELECT 1 FROM swsdb.collections WHERE tenant = %s AND name = %s", [tenant, name]):
@@ -172,8 +182,13 @@ class Documents:
                 RETURNING *""", [doc_id, tenant, collection, external_id, title, filename, kind, Jsonb(metadata),
                                  readers, len(data), sha])
             row = await cur.fetchone()
-            path = self.file(tenant, collection, doc_id, row["version"], kind)
-            await asyncio.to_thread(_write_file, path, data)
+            if self.s.files == "postgres":  # every server reads it from here
+                await cur.execute("INSERT INTO swsdb.originals (document_id, version, data) VALUES (%s, %s, %s) "
+                                  "ON CONFLICT (document_id, version) DO UPDATE SET data = EXCLUDED.data",
+                                  [doc_id, row["version"], data])
+            else:
+                path = self.file(tenant, collection, doc_id, row["version"], kind)
+                await asyncio.to_thread(_write_file, path, data)
             await cur.execute("INSERT INTO swsdb.outbox (document_id, op, version) VALUES (%s, 'index', %s)",
                               [doc_id, row["version"]])
         self.sync.wake()

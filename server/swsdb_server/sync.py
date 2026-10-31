@@ -23,7 +23,7 @@ import psycopg
 import redis.exceptions
 from psycopg_pool import PoolTimeout
 
-from . import observe, webhooks
+from . import cluster, observe, webhooks
 from .embed import EmbeddingError
 from .extract import ExtractionError
 from .names import engine_name
@@ -74,8 +74,12 @@ class Sync:
 
     async def start(self) -> None:
         await self.d.sql.migrate()
-        # rows claimed by a process that died stay locked until their lease ends; this process is the only one
-        await self.d.rows("UPDATE swsdb.outbox SET locked_until = NULL WHERE locked_until IS NOT NULL")
+        # rows claimed by this server before a restart, or by servers that stopped, are free again now rather than
+        # when their lease ends; rows held by servers still running stay theirs
+        await self.d.rows(
+            "UPDATE swsdb.outbox SET locked_until = NULL, locked_by = NULL WHERE locked_until IS NOT NULL AND "
+            "(locked_by IS NULL OR locked_by = %s OR locked_by NOT IN (SELECT id FROM swsdb.servers "
+            "WHERE seen_at > now() - make_interval(secs => %s)))", [self.d.cluster.id, cluster.ALIVE_S])
         pending = (await self.d.one("SELECT count(*) AS n FROM swsdb.outbox"))["n"]
         if pending:
             log.info("resuming %d pending changes", pending)
@@ -106,6 +110,9 @@ class Sync:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        with contextlib.suppress(Exception):  # what this server had claimed is free for the others now
+            await self.d.rows("UPDATE swsdb.outbox SET locked_until = NULL, locked_by = NULL WHERE locked_by = %s",
+                              [self.d.cluster.id])
 
     async def engine_recovered(self, cap: str) -> None:
         """An engine is back: retry what was waiting for it now, not at the end of its backoff."""
@@ -133,8 +140,9 @@ class Sync:
               WHERE o.next_attempt_at <= now() AND (o.locked_until IS NULL OR o.locked_until < now())
                 AND NOT EXISTS (SELECT 1 FROM swsdb.outbox p WHERE p.document_id = o.document_id AND p.id < o.id)
               ORDER BY o.id LIMIT 1 FOR UPDATE SKIP LOCKED)
-            UPDATE swsdb.outbox o SET locked_until = now() + interval '{LEASE_S} seconds', attempts = o.attempts + 1
-            FROM c WHERE o.id = c.id RETURNING o.*""")  # noqa: S608 - LEASE_S is a constant
+            UPDATE swsdb.outbox o SET locked_until = now() + interval '{LEASE_S} seconds', attempts = o.attempts + 1,
+              locked_by = %s
+            FROM c WHERE o.id = c.id RETURNING o.*""", [self.d.cluster.id])  # noqa: S608 - LEASE_S is a constant
 
     async def _work(self, n: int) -> None:
         while True:
@@ -142,14 +150,17 @@ class Sync:
             self._busy += 1
             try:
                 try:
-                    row = await self._claim()
+                    # the fence: a snapshot on any server waits for this change, and holds the next one
+                    async with self.d.cluster.changing():
+                        row = await self._claim()
+                        if row is not None:
+                            await self._run(row)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # Postgres itself unavailable: wait and try again
                     log.debug("worker %d can't claim: %s", n, e)
                     row = None
                 if row is not None:
-                    await self._run(row)
                     continue
             finally:
                 self._busy -= 1
@@ -285,11 +296,9 @@ class Sync:
                             [doc["id"], version])
         if rows:
             return rows
-        path = d.file(doc["tenant"], doc["collection"], str(doc["id"]), version, doc["kind"])
-        try:
-            data = await asyncio.to_thread(path.read_bytes)
-        except FileNotFoundError:
-            raise Permanent(f"the uploaded file for version {version} is missing ({path.name})") from None
+        data = await d.original(doc, version)
+        if data is None:
+            raise Permanent(f"the uploaded file for version {version} is missing")
         try:
             sections = await asyncio.to_thread(parse, data, doc["filename"] or f"x{doc['kind']}")
         except UnsupportedDocument as e:
@@ -394,12 +403,13 @@ class Sync:
         mentions = [{"chunk": e["chunk"], "key": e["key"], "name": e["name"], "type": e["type"]} for e in ents]
         for b in range(0, len(mentions), 500):
             await q("UNWIND $m AS x MATCH (c:Chunk {id: x.chunk}) MERGE (n:Entity {key: x.key}) "
-                    "ON CREATE SET n.name = x.name, n.type = x.type CREATE (c)-[:MENTIONS]->(n)",
+                    "SET n.name = coalesce(n.name, x.name), n.type = coalesce(n.type, x.type) "
+                    "CREATE (c)-[:MENTIONS]->(n)",
                     {"m": mentions[b:b + 500]})
         for b in range(0, len(rels), 500):
             await q("UNWIND $r AS x MATCH (a:Entity {key: x.source}), (b:Entity {key: x.target}) "
                     "MERGE (a)-[:RELATED {type: x.type}]->(b)", {"r": rels[b:b + 500]})
-        await q("MATCH (e:Entity) WHERE NOT (e)<-[:MENTIONS]-() DETACH DELETE e")
+        await g.delete_orphan_entities(key)
 
     async def _switch_on(self, key: str, doc: dict, version: int, n_chunks: int) -> None:
         """Make `version` the one queries return. Order matters: (1) its points visible in Qdrant, (2) the catalog
@@ -426,6 +436,7 @@ class Sync:
                                  "chunks": n_chunks, "entities": n_entities})
         self.webhooks.wake()
         await d.vector.delete_where(key, {"must": [doc_f], "must_not": [ver_f]})
+        await d.rows("DELETE FROM swsdb.originals WHERE document_id = %s AND version <> %s", [doc_id, version])
         folder = d.file(doc["tenant"], doc["collection"], doc_id, version, doc["kind"]).parent
         for old in folder.glob("v*"):
             if old.name != f"v{version}{doc['kind']}":
@@ -460,8 +471,7 @@ class Sync:
             return
         await g.query(key, "MATCH (d:Document {id: $doc}) OPTIONAL MATCH (d)-[:HAS_CHUNK]->(c:Chunk) "
                            "DETACH DELETE c, d", {"doc": doc_id}, read_only=False, timeout_s=120)
-        await g.query(key, "MATCH (e:Entity) WHERE NOT (e)<-[:MENTIONS]-() DETACH DELETE e", None, read_only=False,
-                      timeout_s=120)
+        await g.delete_orphan_entities(key)
 
     async def graph_op(self, doc_id: str, version: int) -> None:
         d = self.d
@@ -476,6 +486,9 @@ class Sync:
         await asyncio.sleep(min(60, self.d.s.reconcile_interval_s))
         while True:
             try:
+                if not self.d.cluster.leader:  # with several servers, one of them reconciles
+                    await asyncio.sleep(self.d.s.reconcile_interval_s)
+                    continue
                 report = await self.reconcile(None, dry_run=False)
                 if report["issues"]:
                     log.warning("reconciliation found and queued repairs: %s", report["totals"])

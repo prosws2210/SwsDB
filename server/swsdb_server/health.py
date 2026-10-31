@@ -13,7 +13,6 @@ import httpx
 import psycopg
 import redis.asyncio as aioredis
 
-from .engines import ENGINES
 from .settings import Settings
 
 log = logging.getLogger("swsdb.health")
@@ -88,13 +87,49 @@ class Probes:
                 self._db_ready = True
             return str(version).split()[0]
 
+    async def _pg_extension(self, name: str) -> str:
+        """Lite profile: the extension's version (created in the swsdb database on first use), checked on the
+        server swsdb uses."""
+        if self.s.postgres_url:
+            conn = await psycopg.AsyncConnection.connect(self.s.postgres_url.get_secret_value(), connect_timeout=3,
+                                                         autocommit=True)
+        else:
+            conn = await psycopg.AsyncConnection.connect(host=str(self.s.pg_socket_dir), dbname="postgres",
+                                                         user="swsdb", connect_timeout=3, autocommit=True)
+        async with conn:
+            row = await (await conn.execute("SELECT coalesce(installed_version, default_version) "
+                                            "FROM pg_available_extensions WHERE name = %s", [name])).fetchone()
+            if row is None:
+                raise RuntimeError(f"the PostgreSQL extension {name!r} is not installed on this server")
+            if name == "age":
+                libs = (await (await conn.execute(
+                    "SELECT current_setting('shared_preload_libraries') || ',' || "
+                    "current_setting('session_preload_libraries')")).fetchone())[0]
+                if "age" not in [x.strip().strip('"').split("/")[-1] for x in libs.split(",")]:
+                    raise RuntimeError("Apache AGE must be in shared_preload_libraries (or session_preload_libraries)")
+            return str(row[0])
+
     async def vector(self) -> str:
+        if self.s.in_postgres("vector"):
+            return await self._pg_extension("vector")
         r = await self.http.get(f"{self.qdrant}/readyz")
         r.raise_for_status()
         info = (await self.http.get(f"{self.qdrant}/")).json()
         return str(info.get("version", "?"))
 
     async def graph(self) -> str:
+        if self.s.in_postgres("graph"):
+            return await self._pg_extension("age")
+        if self.s.neo4j_url:
+            auth = (self.s.neo4j_user, self.s.neo4j_password.get_secret_value() if self.s.neo4j_password else "")
+            r = await self.http.post(f"{self.s.neo4j_url.rstrip('/')}/db/{self.s.neo4j_database}/query/v2",
+                                     json={"statement": "CALL dbms.components() YIELD versions RETURN versions[0]"},
+                                     auth=auth, headers={"accept": "application/json"})
+            r.raise_for_status()
+            body = r.json()
+            if body.get("errors"):
+                raise RuntimeError(body["errors"][0].get("message", "Neo4j error"))
+            return str(body["data"]["values"][0][0])
         await self.redis.ping()
         for m in await self.redis.module_list():
             name = m.get(b"name") or m.get("name")
@@ -113,7 +148,7 @@ class Monitor:
         self.s = s
         self.started = time.time()
         self.status: dict[str, EngineStatus] = {
-            c: EngineStatus(capability=c, engine=ENGINES[c].product) for c in s.engines}
+            c: EngineStatus(capability=c, engine=s.product(c)) for c in s.engines}
         self._task: asyncio.Task | None = None
         self.probes: Probes | None = None
         self._rechecking: set[str] = set()
