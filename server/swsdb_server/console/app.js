@@ -1535,13 +1535,13 @@ view.tables = async (root, arg, actions) => {
   if (tab === "sql") return dataSql(root);
   if (first !== "table" || !rest.length) return dataTables(root, null);
   const sub = ["rows", "structure", "api"].includes(rest[rest.length - 1]) && rest.length > 1 ? rest.pop() : "rows";
-  return dataTables(root, rest.join("/"), sub);
+  return dataTables(root, rest.join("/"), sub, actions);
 };
 
 // Vectors: #vectors/<collection>/<tab>
-view.vectors = async (root, arg) => {
+view.vectors = async (root, arg, actions) => {
   fill(root, skeleton("block", 2));
-  return dataVectors(root, (arg || "").split("/").filter(Boolean));
+  return dataVectors(root, (arg || "").split("/").filter(Boolean), actions);
 };
 
 // addresses from before the Data page was split by engine
@@ -1661,7 +1661,7 @@ const VECTOR_TABS = [["points", "Points"], ["info", "Info"], ["indexes", "Indexe
 const vecLabel = (v) => v.name || "default";
 const vecShape = (v) => `${v.size ?? "?"} · ${v.distance ?? ""}${v.kind === "multivector" ? " · multi" : ""}`;
 
-async function dataVectors(root, rest = []) {
+async function dataVectors(root, rest = [], actions = null) {
   if (!rest[0]) return vecCollections(root);
   const coll = rest[0];
   const tab = VECTOR_TABS.some(([k]) => k === rest[1]) ? rest[1] : "points";
@@ -1669,13 +1669,13 @@ async function dataVectors(root, rest = []) {
   const [meta, inspect] = await Promise.all([api("GET", collPath(coll)), api("GET", collPath(coll, "/inspect")).catch(() => null)]);
   const ins = inspect || { vectors: [], sparse: [], payload_indexes: [], engine: "?" };
   const isDocs = !!meta.documents;
-  const tabs = h("div", { class: "vtabs", role: "tablist" }, VECTOR_TABS.map(([k, label]) =>
-    h("button", { type: "button", role: "tab", class: k === tab ? "on" : null, onclick: () => go(coll, k) }, label)));
+  if (actions) fill(actions, pageTabs(`vectors/${encodeURIComponent(coll)}`, tab, VECTOR_TABS));
   const body = h("div", { class: "stack" });
   fill(root, h("div", { class: "vpage" },
     h("a", { href: "#vectors", class: "vback" }, "← Collections"),
-    h("h2", { class: "vtitle" }, coll, isDocs ? h("span", { class: "vchip" }, "documents") : null),
-    tabs, body));
+    h("h2", { class: "vtitle" }, coll, isDocs ? h("span", { class: "vchip" }, "documents") : null,
+      h("span", { class: "vtitle-sub" }, `${num(ins.points)} points${ins.segments != null ? ` · ${plural(ins.segments, "segment")}` : ""}`)),
+    body));
   const ctx = { coll, ins, meta, isDocs, go };
   const views = { points: vecPoints, info: vecInfo, indexes: vecIndexes, memory: vecMemory, segments: vecSegments,
                   quality: vecQuality, map: vecMap, api: vecApi };
@@ -2134,7 +2134,7 @@ function rowDrawer(table, cols, row) {
   document.body.append(scrim, drawer);
 }
 
-async function dataTables(root, selected, sub = "rows") {
+async function dataTables(root, selected, sub = "rows", actions = null) {
   const list = await guard(() => sql(TABLES_SQL));
   if (!list) return;
   const tables = list.rows.map(([name, kind, columns, rows, bytes]) => ({ name, kind, columns, rows, bytes }));
@@ -2146,9 +2146,8 @@ async function dataTables(root, selected, sub = "rows") {
       h("a", { href: "#tables", class: "vback" }, "← Tables"),
       h("h2", { class: "vtitle" }, h("span", { class: "mono" }, selected), h("span", { class: "vchip" }, t.kind),
         h("span", { class: "vtitle-sub" }, `${plural(Number(t.columns), "column")} · about ${num(t.rows)} rows · ${bytesText(t.bytes)}`)),
-      h("div", { class: "vtabs", role: "tablist" }, [["rows", "Rows"], ["structure", "Structure"], ["api", "API"]].map(([k, l]) =>
-        h("button", { type: "button", role: "tab", class: k === sub ? "on" : null, onclick: () => open(selected, k) }, l))),
       main));
+    if (actions) fill(actions, pageTabs(`tables/table/${encodeURIComponent(selected)}`, sub, [["rows", "Rows"], ["structure", "Structure"], ["api", "API"]]));
     await tableGrid(main, selected, sub);
     return;
   }
