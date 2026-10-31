@@ -158,7 +158,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
                 made.append(app.state.sql)
             if "vector" in s.engines:
                 app.state.vector = (PgVectorStore(app.state.sql) if s.in_postgres("vector")
-                                    else VectorStore(qdrant_url(s), qdrant_key(s, secret)))
+                                    else VectorStore(qdrant_url(s), qdrant_key(s, secret), ef=s.vector_ef))
                 made.append(app.state.vector)
             if "graph" in s.engines:
                 if s.in_postgres("graph"):

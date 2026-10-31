@@ -299,6 +299,8 @@ class Snapshots:
                 st.graph.forget()  # restored with the dump; drop what this process remembered of the old one
             await asyncio.to_thread(self._restore_files, work / "files")
             st.keys._rows = None  # the restored database has its own keys
+            if getattr(st, "docs", None) is not None:
+                st.docs.forget()  # the catalog and search results this process remembered are the old database's
             await st.cluster.notify("reset")  # and every other server must forget what it cached of the old one
         finally:
             if fenced:
@@ -326,22 +328,30 @@ class Snapshots:
 
     async def _restore_postgres(self, dump: Path, tenant_roles: list[str]) -> None:
         sql = self.app.state.sql
-        async with await psycopg.AsyncConnection.connect(sql.admin_conninfo("postgres"), autocommit=True) as conn:
-            for role in tenant_roles:  # roles live outside the database: create those the dump's objects belong to
-                if not role.startswith("swsdb_t_"):
-                    continue
-                exists = await (await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", [role])).fetchone()
-                if not exists:
-                    await conn.execute(pgsql.SQL(
-                        "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS "
-                        "NOINHERIT CONNECTION LIMIT 20").format(pgsql.Identifier(role)))
-            db = pgsql.Identifier(sql.dbname)
-            await conn.execute(pgsql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(db))
-            await conn.execute(pgsql.SQL("CREATE DATABASE {}").format(db))
-        await sql.drop_connections()
-        sql.forget()
-        args, env = sql.tool_args()
-        await run_pg(pg_bin("pg_restore"), *args, "--exit-on-error", str(dump), env=env)
+        # from the drop until pg_restore is done, nothing in this process may migrate the empty database (a
+        # heartbeat or an outbox poll would otherwise create swsdb's schema under pg_restore's feet)
+        sql.restoring = True
+        try:
+            async with await psycopg.AsyncConnection.connect(sql.admin_conninfo("postgres"),
+                                                             autocommit=True) as conn:
+                for role in tenant_roles:  # roles live outside the database: create those the dump's objects use
+                    if not role.startswith("swsdb_t_"):
+                        continue
+                    exists = await (await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s",
+                                                       [role])).fetchone()
+                    if not exists:
+                        await conn.execute(pgsql.SQL(
+                            "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS "
+                            "NOINHERIT CONNECTION LIMIT 20").format(pgsql.Identifier(role)))
+                db = pgsql.Identifier(sql.dbname)
+                await conn.execute(pgsql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(db))
+                await conn.execute(pgsql.SQL("CREATE DATABASE {}").format(db))
+            await sql.drop_connections()
+            sql.forget()
+            args, env = sql.tool_args()
+            await run_pg(pg_bin("pg_restore"), *args, "--exit-on-error", str(dump), env=env)
+        finally:
+            sql.restoring = False
         for role in tenant_roles:  # search_path is a role setting, not part of the dump
             if role.endswith("__u"):  # a tenant's end-users role works in its tenant's schema
                 owner = role[:-3]

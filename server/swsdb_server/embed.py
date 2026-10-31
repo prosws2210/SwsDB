@@ -61,6 +61,9 @@ class Embedder:
         # question skips the model entirely. Bounded (10,000 questions is ~15 MB); documents never go through it
         self._qcache: OrderedDict[tuple[str, str], object] = OrderedDict()
         self._qcache_max = query_cache
+        # questions waiting for the local model, embedded together (see _batched)
+        self._pending: list[tuple[str, asyncio.Future]] = []
+        self._flushing: asyncio.Task | None = None
 
     def _cached(self, kind: str, text: str):
         hit = self._qcache.get((kind, text))
@@ -102,6 +105,36 @@ class Embedder:
         return self._sparse
 
     DOC_BATCH = 8  # documents are embedded a few passages at a time, so a search never waits long behind them
+    QUERY_BATCH = 16  # questions embedded in one model call, at most
+
+    async def _batched(self, text: str) -> list[float]:
+        """One question's vector from the local model. Questions that arrive while the model is busy are embedded
+        together in its next call: a batch of 8 short questions costs little more than one, where 8 calls one after
+        the other cost 8 times as much. A question alone goes straight in: there is no waiting window."""
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._pending.append((text, fut))
+        if self._flushing is None or self._flushing.done() or self._flushing.get_loop() is not loop:
+            self._flushing = loop.create_task(self._flush())
+        return await fut
+
+    async def _flush(self) -> None:
+        while self._pending:
+            batch, self._pending = self._pending[:self.QUERY_BATCH], self._pending[self.QUERY_BATCH:]
+            batch = [(t, f) for t, f in batch if not f.done()]  # (a cancelled request no longer waits)
+            if not batch:
+                continue
+            texts = list(dict.fromkeys(t for t, _ in batch))
+            try:
+                vectors = dict(zip(texts, await asyncio.to_thread(self._local_dense, texts, True), strict=True))
+            except Exception as e:
+                for _, f in batch:
+                    if not f.done():
+                        f.set_exception(e)
+                continue
+            for t, f in batch:
+                if not f.done():
+                    f.set_result(vectors[t])
 
     def _run(self, fn, texts: list[str], query: bool) -> list:
         """One inference at a time. A search goes first: documents wait between their small batches while one is
@@ -155,6 +188,8 @@ class Embedder:
 
     async def _embed_dense(self, texts: list[str], query: bool) -> list[list[float]]:
         if self.provider == "local":
+            if query and len(texts) == 1:
+                return [await self._batched(texts[0])]
             return await asyncio.to_thread(self._local_dense, texts, query)
         out: list[list[float]] = []
         headers = {"authorization": f"Bearer {self.api_key}"} if self.api_key else {}

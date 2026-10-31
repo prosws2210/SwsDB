@@ -73,5 +73,23 @@ jobs:
           name: quality-report
           path: quality.json
           if-no-files-found: ignore
+      - name: Latency check (server-side p50 against benchmarks/results/ci-latency-baseline.json)
+        run: |
+          docker run -d --name latency -p 6464:6464 -p 5432:5432 -e SWSDB_API_KEY=ci-latency -e SWSDB_WORKERS=2 \
+            swsdb/swsdb:dev
+          for i in $(seq 120); do curl -sf localhost:6464/readyz | grep -q '"ready"' && break; sleep 2; done
+          uv run --project server --frozen python benchmarks/scale/generate.py --key ci-latency --rows 10000 \
+            --points 10000 --edges 10000 --docs 50 --keyfile "$RUNNER_TEMP/scale-key.json"
+          docker run --rm --network container:latency -v "$PWD/benchmarks:/bench" -v "$RUNNER_TEMP:/keys" \
+            --entrypoint /opt/swsdb/venv/bin/python swsdb/swsdb:dev /bench/scale/latency.py \
+            --keyfile /keys/scale-key.json --n 100 --rows 10000 --points 10000 --edges 10000 \
+            --out /bench/results/ci-latency.json --check /bench/results/ci-latency-baseline.json
+          docker rm -f latency
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: latency-report
+          path: benchmarks/results/ci-latency.json
+          if-no-files-found: ignore
       - name: Image size
         run: docker image inspect swsdb/swsdb:dev --format 'image size {{.Size}} bytes'

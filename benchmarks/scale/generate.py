@@ -70,6 +70,8 @@ def vectors(api: httpx.Client, points: int, dim: int = 384) -> None:
     api.delete("/v1/collections/vecs")
     r = api.put("/v1/collections/vecs", json={"vector": {"size": dim, "distance": "cosine"}})
     r.raise_for_status()
+    # the field the filtered search uses is indexed, as it should be (without, every filtered search scans)
+    api.put("/v1/collections/vecs/index", json={"field": "category", "type": "keyword"}).raise_for_status()
     rng = np.random.default_rng(7)
     centres = rng.normal(0, 1, (len(CATEGORIES), dim))  # categories cluster, like real embeddings of topics
     batch = 1000

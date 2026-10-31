@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     # 300 requests a second; each worker is one more server of the cluster (ADR 0006) and loads its own embedding
     # model (~300 MB)
     workers: int = Field(1, ge=1, le=64)
+    # candidates the vector index explores per search (Qdrant's hnsw_ef): higher finds more of the true nearest
+    # neighbours for a little more time; 0 leaves Qdrant's default (ef_construct)
+    vector_ef: int = Field(128, ge=0, le=4096)
+    # documents searches kept in memory per server process, until their collection changes (or for the TTL, a
+    # safety net); 0 turns it off
+    result_cache: int = Field(2000, ge=0, le=1_000_000)
+    result_cache_ttl_s: float = Field(60.0, gt=0, le=86_400)
     # the embedding model's CPU threads per worker. Default: the cores shared out between the workers, so several
     # workers' models don't fight over every core (with one worker: every core)
     embed_threads: int | None = Field(None, ge=1, le=256)

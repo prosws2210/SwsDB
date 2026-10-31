@@ -79,6 +79,27 @@ Keep secrets out of the file: use the `_FILE` variables for them.
 A collection remembers the embedding model it was created with. Changing `SWSDB_EMBEDDINGS_MODEL` later doesn't
 silently mix vectors: documents in older collections fail with a message saying which model to set back.
 
+## Performance
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SWSDB_WORKERS` | `1` | server processes on the port. One process serves about 300 requests a second; each extra one uses another core and ~300 MB (its own embedding model). Workers are servers of the cluster under the names `<server id>/<pid>`, so caches stay in step through the same events ([several servers](../guides/deployment.md#several-servers)) |
+| `SWSDB_EMBED_THREADS` | the cores divided by the workers | CPU threads of the embedding model in each worker (with one worker: every core) |
+| `SWSDB_EMBED_CACHE` | `10000` | questions' vectors kept in memory per worker: a repeated question skips the model (`0`: off) |
+| `SWSDB_RESULT_CACHE` | `2000` | documents searches kept in memory per worker until their collection changes: a document version going live or a delete starting clears them at once, on every server (`0`: off) |
+| `SWSDB_RESULT_CACHE_TTL_S` | `60` | a cached search's longest life, a safety net for changes that bypass the catalog (raw writes through `/qdrant`) |
+| `SWSDB_VECTOR_EF` | `128` | candidates the vector index explores per search (Qdrant's `hnsw_ef`): higher finds more of the true nearest neighbours for a little more time (`0`: Qdrant's default) |
+| `SWSDB_TIMING` | `true` | a `Server-Timing` header on every response, with the time spent in each stage (`auth`, `postgres`, `qdrant`, `graph`, `embed`, `encode`, `total`); browsers' developer tools show it |
+
+The bundled Postgres sizes its memory to the container: an eighth for its cache (`shared_buffers`, 128 MB to 8 GB),
+half as the planner's estimate of the OS cache, and a per-query sort memory that 150 connections can't turn into more
+than about a quarter. It runs with `jit = off` and `random_page_cost = 1.1` (short queries on SSDs), and `pg_prewarm`
+reloads the pages that were cached before a restart. `ALTER SYSTEM` overrides any of these.
+
+A filter on a vector collection's payload field is only fast when the field is indexed: `PUT
+/v1/collections/{name}/index` (`{"field": "category", "type": "keyword"}`). Documents collections index what they
+filter on themselves, metadata fields included, the first time a search filters on them.
+
 ## Client (SDK, CLI and `swsdb mcp`)
 
 | Variable | Meaning |

@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import multiprocessing
+import os
 import random
 import statistics
 import time
@@ -104,7 +105,10 @@ class Bench:
         breakdown = {k: round(statistics.mean(s.get(k, 0.0) for s in st1), 2) for k in keys}
         total8 = round(statistics.mean(s.get("total", 0.0) for s in st8), 2)
         row = {"endpoint": label, "one_client": stats(single), "eight_clients": stats(conc), "server_timing": breakdown,
-               "eight_clients_server_total": total8}
+               "eight_clients_server_total": total8,
+               # what the CI check compares: the server's own time, far steadier than a shared runner's client
+               "server_p50": stats([s.get("total", 0.0) for s in st1])["p50"],
+               "eight_clients_server_p50": stats([s.get("total", 0.0) for s in st8])["p50"]}
         self.rows.append(row)
         print(f"{label:46s} 1 client p50 {row['one_client']['p50']:7.2f} p95 {row['one_client']['p95']:7.2f} | "
               f"8 clients p50 {row['eight_clients']['p50']:7.2f} p95 {row['eight_clients']['p95']:7.2f} "
@@ -166,10 +170,30 @@ async def main_async(a) -> dict:
             "scale": {"rows": rows, "points": points, "edges": a.edges}, "results": b.rows}
 
 
+def check(report: dict, baseline_path: str, tolerance: float, floor_ms: float) -> list[str]:
+    """Endpoints whose server-side p50 got worse than the baseline's by more than `tolerance` (a fraction) and by
+    more than `floor_ms` (so a 1 ms request isn't failed for a 0.3 ms wobble)."""
+    with open(baseline_path) as f:
+        base = {r["endpoint"]: r for r in json.load(f)["results"]}
+    worse = []
+    for r in report["results"]:
+        b = base.get(r["endpoint"])
+        if b is None:
+            continue
+        for metric in ("server_p50", "eight_clients_server_p50"):
+            now, then = r.get(metric), b.get(metric)
+            if now is None or then is None:
+                continue
+            if now > then * (1 + tolerance) and now - then > floor_ms:
+                worse.append(f"{r['endpoint']}: {metric} {then:.2f} -> {now:.2f} ms")
+    return worse
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--url", default="http://127.0.0.1:6464")
-    p.add_argument("--key", required=True, help="the scale project's key (written by generate.py --keyfile)")
+    p.add_argument("--key", help="the scale project's key")
+    p.add_argument("--keyfile", help="or the file generate.py --keyfile wrote it to")
     p.add_argument("--n", type=int, default=200, help="requests per endpoint, per client mode")
     p.add_argument("--rows", type=int, default=1_000_000)
     p.add_argument("--points", type=int, default=250_000)
@@ -177,13 +201,31 @@ def main() -> None:
     p.add_argument("--out", default=None)
     p.add_argument("--seed", type=int, default=None, help="questions' seed (default: new each run, so the server's "
                    "question cache can't make 'new question' rows look faster)")
+    p.add_argument("--check", default=None, help="a baseline report: fail if an endpoint's server-side p50 is worse")
+    p.add_argument("--tolerance", type=float, default=0.2, help="how much worse than the baseline fails (0.2: 20%%)")
+    p.add_argument("--floor-ms", type=float, default=2.0, help="and by at least this much")
     a = p.parse_args()
+    if a.keyfile:
+        with open(a.keyfile) as f:
+            a.key = json.load(f)["key"]
+    if not a.key:
+        p.error("--key or --keyfile is required")
     if a.seed is None:
         a.seed = int(time.time())
     report = asyncio.run(main_async(a))
     if a.out:
         with open(a.out, "w") as f:
             json.dump(report, f, indent=2)
+    if a.check:
+        if not os.path.exists(a.check):
+            print(f"no baseline at {a.check}: nothing to compare (record one from this run's report)")
+            return
+        worse = check(report, a.check, a.tolerance, a.floor_ms)
+        for w in worse:
+            print("SLOWER", w)
+        if worse:
+            raise SystemExit(1)
+        print("latency check: no endpoint is slower than the baseline")
 
 
 if __name__ == "__main__":

@@ -291,3 +291,39 @@ def test_the_original_file_downloads_as_uploaded(box):
     reader = client(box, READ)
     assert reader._http.get("/v1/collections/originals/original/refunds").status_code == 403
     assert db._http.get("/v1/collections/originals/original/missing").status_code == 404
+
+
+def test_cached_results_follow_every_change(box):
+    """A repeated search is answered from memory, but never with what changed since: not another caller's
+    documents, not a deleted one, not an old version, and a new document shows up."""
+    db = client(box)
+    db._call("PUT", "/v1/collections/cached", {"documents": True})
+    add(db, "cached", "ferry", "The Quokka Island ferry leaves at eight.", readers=["group:crew"])
+    wait_ready(db, "cached", "ferry")
+    q = "Quokka Island ferry"
+    first = query(db, "cached", q, k=5, principals=["group:crew"])
+    again = query(db, "cached", q, k=5, principals=["group:crew"])
+    assert [h["document"] for h in first["hits"]] == ["ferry"] and "cached" not in first
+    assert again.get("cached") is True and again["hits"] == first["hits"]
+    # another caller's search is its own: nothing of the crew's leaks through the cache
+    assert query(db, "cached", q, k=5, principals=["user:1"])["hits"] == []
+    assert query(client(box, READ), "cached", q, k=5)["hits"] == []
+    # a new version replaces the cached one as soon as it is live
+    add(db, "cached", "ferry", "The Quokka Island ferry now leaves at nine.", readers=["group:crew"])
+    wait_ready(db, "cached", "ferry", 2)
+    hits = query(db, "cached", q, k=5, principals=["group:crew"])["hits"]
+    assert [h["text"] for h in hits] == ["The Quokka Island ferry now leaves at nine."]
+    # a new document shows up
+    add(db, "cached", "ferry-winter", "In winter the Quokka Island ferry runs twice a day.", readers=["*"])
+    wait_ready(db, "cached", "ferry-winter")
+    assert {h["document"] for h in query(db, "cached", q, k=5, principals=["group:crew"])["hits"]} == {
+        "ferry", "ferry-winter"}
+    # a deleted one is gone at once, cached or not
+    query(db, "cached", q, k=5, principals=["group:crew"])
+    db._call("DELETE", "/v1/collections/cached/documents/ferry")
+    assert {h["document"] for h in query(db, "cached", q, k=5, principals=["group:crew"])["hits"]} == {
+        "ferry-winter"}
+    # a collection dropped and created again under the same name starts empty
+    db._call("DELETE", "/v1/collections/cached")
+    db._call("PUT", "/v1/collections/cached", {"documents": True})
+    assert query(db, "cached", q, k=5, principals=["group:crew"])["hits"] == []

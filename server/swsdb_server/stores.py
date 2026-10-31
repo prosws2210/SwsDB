@@ -231,6 +231,21 @@ MIGRATIONS: list[str] = [
     CREATE TABLE swsdb.project_logins (
       tenant text PRIMARY KEY, role text NOT NULL, verifier text, issued_at timestamptz NOT NULL DEFAULT now());
     """,
+    # 13: a collection's generation, for the search result cache: bumped in the same transaction as every change to
+    # what its searches may return (a version going live, a delete starting or undone). Not on a row's removal: a
+    # removed document was 'deleting' first, and a dropped collection takes its rows with it
+    """
+    ALTER TABLE swsdb.collections ADD COLUMN generation bigint NOT NULL DEFAULT 0;
+    CREATE FUNCTION swsdb.bump_generation() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      UPDATE swsdb.collections SET generation = generation + 1 WHERE tenant = NEW.tenant AND name = NEW.collection;
+      RETURN NULL;
+    END $$;
+    CREATE TRIGGER documents_visibility AFTER UPDATE ON swsdb.documents FOR EACH ROW
+      WHEN (OLD.live_version IS DISTINCT FROM NEW.live_version
+            OR (OLD.status = 'deleting') IS DISTINCT FROM (NEW.status = 'deleting'))
+      EXECUTE FUNCTION swsdb.bump_generation();
+    """,
 ]
 
 TENANT_ROLE_PREFIX = "swsdb_t_"  # bootstrap's pg_ident map lets the server log in as any role with this prefix
@@ -321,30 +336,25 @@ async def _reset_session(conn) -> None:
     await conn.execute("RESET ALL; DISCARD TEMP")
 
 
-def _begin(read_only: bool, timeout_s: float) -> str:
-    """The transaction's start, its read-only mode and its timeout in one round trip (no parameters: the simple
-    protocol runs the statements together, and the timeout is a whole number of milliseconds)."""
-    return f"BEGIN{' READ ONLY' if read_only else ''}; SET LOCAL statement_timeout = {max(1, int(timeout_s * 1000))}"
-
-
-class _Transaction:
-    """BEGIN (with its settings) ... COMMIT, ROLLBACK on any error: what conn.transaction() does, in fewer round
-    trips. The pool's connections run in autocommit mode, so the explicit BEGIN is the transaction."""
-
-    def __init__(self, conn, read_only: bool, timeout_s: float):
-        self.conn, self.read_only, self.timeout_s = conn, read_only, timeout_s
-
-    async def __aenter__(self):
-        await self.conn.execute(_begin(self.read_only, self.timeout_s))
-        return self.conn
-
-    async def __aexit__(self, exc_type, exc, tb):
-        if exc_type is None:
-            await self.conn.execute("COMMIT")
-        else:
-            with contextlib.suppress(psycopg.Error):  # a broken connection: the pool discards it
-                await self.conn.execute("ROLLBACK")
-        return False
+async def _in_transaction(conn, read_only: bool, timeout_s: float, statements: list[tuple]) -> psycopg.AsyncCursor:
+    """BEGIN [READ ONLY], the timeout, the statements and COMMIT sent together and answered together (psycopg's
+    pipeline mode): one wait for the network instead of one per step. ROLLBACK on any error. The pool's connections
+    run in autocommit mode, so the explicit BEGIN is the transaction. Pipeline mode always uses the extended
+    protocol: a string holding several statements is refused, as a prepared statement's is. Returns the last
+    statement's cursor, its rows already received."""
+    cursors = []
+    try:
+        async with conn.pipeline():
+            await conn.execute("BEGIN READ ONLY" if read_only else "BEGIN")
+            await conn.execute(f"SET LOCAL statement_timeout = {max(1, int(timeout_s * 1000))}")
+            for statement, params, prepare in statements:
+                cursors.append(await conn.execute(statement, params, prepare=prepare))
+            await conn.execute("COMMIT")
+    except BaseException:
+        with contextlib.suppress(psycopg.Error):  # a broken connection: the pool discards it
+            await conn.execute("ROLLBACK")
+        raise
+    return cursors[-1]
 
 
 class SqlStore:
@@ -365,6 +375,9 @@ class SqlStore:
         self._tenant_pools: dict[str, AsyncConnectionPool] = {}  # role -> pool, most recently used last
         self._roles: dict[str, str] = {"default": APP_ROLE}
         self._migrated = False
+        # set while a restore replaces the database: nothing may migrate the empty one meanwhile (a heartbeat or an
+        # outbox poll would otherwise create swsdb's schema under pg_restore's feet)
+        self.restoring = False
         self.backup_dir: Path | None = None  # where a dump goes before migrating existing data (set by the app)
         self.last_backup: Path | None = None
 
@@ -595,12 +608,13 @@ class SqlStore:
                     old = self._tenant_pools.pop(next(iter(self._tenant_pools)))
                     await old.close()
             self._tenant_pools[role] = pool
-            async with pool.connection(timeout=10) as conn, _Transaction(conn, read_only, timeout_s):
-                await conn.execute(
-                    "SELECT set_config('swsdb.user_id', %s, true), set_config('swsdb.user_email', %s, true), "
-                    "set_config('swsdb.user_groups', %s, true)",
-                    [user.id if user else "", user.email if user else "", ",".join(user.groups) if user else ""])
-                cur = await conn.execute(statement, params or None)
+            async with pool.connection(timeout=10) as conn:
+                cur = await _in_transaction(conn, read_only, timeout_s, [
+                    ("SELECT set_config('swsdb.user_id', %s, true), set_config('swsdb.user_email', %s, true), "
+                     "set_config('swsdb.user_groups', %s, true)",
+                     [user.id if user else "", user.email if user else "", ",".join(user.groups) if user else ""],
+                     None),
+                    (statement, params or None, None)])
                 if cur.description is None:
                     return {"columns": [], "rows": [], "row_count": cur.rowcount, "truncated": False}
                 rows = await cur.fetchmany(max_rows + 1)
@@ -633,6 +647,8 @@ class SqlStore:
         """Apply swsdb's own schema migrations once per process (idempotent and recorded)."""
         if self._migrated:
             return
+        if self.restoring:
+            raise Unavailable("PostgreSQL: the database is being restored from a snapshot")
         async with self.pool.connection() as conn, conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(7367736462)")  # one migrator at a time
             await conn.execute("CREATE SCHEMA IF NOT EXISTS swsdb")
@@ -689,8 +705,8 @@ class SqlStore:
         await self.migrate()
         try:
             pool = await self._pool_for(tenant)
-            async with pool.connection(timeout=10) as conn, _Transaction(conn, read_only, timeout_s):
-                cur = await conn.execute(statement, params or None, prepare=True)
+            async with pool.connection(timeout=10) as conn:
+                cur = await _in_transaction(conn, read_only, timeout_s, [(statement, params or None, True)])
                 if cur.description is None:
                     return {"columns": [], "rows": [], "row_count": cur.rowcount, "truncated": False}
                 rows = await cur.fetchmany(max_rows + 1)
@@ -752,8 +768,12 @@ class VectorStore:
     in_postgres = False  # the lite profile's pgvector store says True: it is copied with the Postgres dump
     engine = "qdrant"
 
-    def __init__(self, url: str, api_key: str):
+    def __init__(self, url: str, api_key: str, ef: int = 128):
         self.url = url.rstrip("/")
+        # how many candidates the HNSW index explores per dense search (Qdrant's default is ef_construct, 100). 128
+        # measured +4 points of recall@10 for ~0.3 ms on 250k 384-dimension points; 0 leaves Qdrant's default
+        self.ef = ef
+        self._indexed: set[tuple[str, str]] = set()  # (collection, field) payload indexes known to exist
         self._headers = {"api-key": api_key, "accept-encoding": "identity", "content-type": "application/json"}
         # identity: Qdrant otherwise gzips every reply it's asked to, which costs ~40 ms per search on loopback.
         # httpx stays for streaming snapshots and the /qdrant gate's pass-through; swsdb's own calls use aiohttp
@@ -840,12 +860,25 @@ class VectorStore:
         await self._call("PUT", f"/collections/{name}/points", params={"wait": "true"}, json={"points": out})
         return len(out)
 
+    def _with_ef(self, body: dict) -> dict:
+        """The search breadth on a query body's dense searches (a hybrid's prefetches too), unless it sets its own."""
+        if not self.ef:
+            return body
+        q = body.get("query")
+        sparse_or_fusion = isinstance(q, dict) and ("indices" in q or "fusion" in q)
+        if q is not None and not sparse_or_fusion and "params" not in body:
+            body = {**body, "params": {"hnsw_ef": max(self.ef, int(body.get("limit") or 0))}}
+        if isinstance(body.get("prefetch"), list):
+            body = {**body, "prefetch": [self._with_ef(p) if isinstance(p, dict) else p for p in body["prefetch"]]}
+        return body
+
     async def search(self, name: str, vector: list[float], limit: int, where: dict | None,
                      with_payload: bool = True) -> list[dict]:
         body: dict[str, Any] = {"query": vector, "limit": limit, "with_payload": True}
         if (f := _qdrant_filter(where)) is not None:
             body["filter"] = f
-        hits = (await self._call("POST", f"/collections/{name}/points/query", json=body))["result"]["points"]
+        hits = (await self._call("POST", f"/collections/{name}/points/query",
+                                 json=self._with_ef(body)))["result"]["points"]
         out = []
         for h in hits:
             payload = dict(h.get("payload") or {})
@@ -873,10 +906,22 @@ class VectorStore:
             "vectors": {"dense": {"size": dim, "distance": "Cosine"}},
             "sparse_vectors": {"sparse": {"modifier": "idf"}},
             "on_disk_payload": True})
-        for field, schema in (("document_id", "keyword"), ("readers", "keyword"), ("live", "bool"),
-                              ("version", "integer")):
+        for field, schema in (("document_id", "keyword"), ("doc", "keyword"), ("readers", "keyword"),
+                              ("live", "bool"), ("version", "integer")):
             await self._call("PUT", f"/collections/{name}/index", params={"wait": "true"},
                              json={"field_name": field, "field_schema": schema})
+
+    async def ensure_index(self, name: str, field: str, schema: str) -> None:
+        """A payload index on a field searches filter on, created once (in the background: Qdrant builds it while
+        searches go on; until then a filter on the field scans, as before)."""
+        if (name, field) in self._indexed:
+            return
+        self._indexed.add((name, field))
+        try:
+            await self._call("PUT", f"/collections/{name}/index", params={"wait": "false"},
+                             json={"field_name": field, "field_schema": schema})
+        except StoreError:
+            self._indexed.discard((name, field))  # e.g. the collection is being dropped: try again next time
 
     async def is_documents(self, name: str) -> bool:
         r = (await self._call("GET", f"/collections/{name}"))["result"]["config"]["params"]
@@ -914,7 +959,8 @@ class VectorStore:
                 return
 
     async def query(self, name: str, body: dict) -> list[dict]:
-        return (await self._call("POST", f"/collections/{name}/points/query", json=body))["result"]["points"]
+        return (await self._call("POST", f"/collections/{name}/points/query",
+                                 json=self._with_ef(body)))["result"]["points"]
 
     async def browse(self, name: str, limit: int, offset: str | int | None, where: dict | None,
                      with_vector: bool = False) -> dict:

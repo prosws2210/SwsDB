@@ -19,10 +19,12 @@ import uuid
 from pathlib import Path
 from typing import Any, ClassVar
 
+import orjson
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from . import observe
+from .cache import ResultCache
 from .cluster import Cluster
 from .embed import Embedder
 from .extract import Extractor, NameExtractor
@@ -75,6 +77,8 @@ class Documents:
                  embedder: Embedder, extractor: Extractor | NameExtractor | None):
         self.s, self.sql, self.vector, self.graph = s, sql, vector, graph
         self.embedder, self.extractor = embedder, extractor
+        self._indexing: set[asyncio.Task] = set()  # payload indexes being created for searches' filters
+        self.results = ResultCache(s.result_cache, s.result_cache_ttl_s)
         # the catalog of documents collections, per (tenant, name): read on almost every request, changed rarely.
         # Creating or dropping a collection clears it here and, through a cluster event, on every other server;
         # the expiry is a safety net for an event that never arrives
@@ -115,10 +119,17 @@ class Documents:
     CATALOG_TTL_S = 30.0
 
     def forget(self, tenant: str | None = None, name: str | None = None) -> None:
+        indexed = getattr(self.vector, "_indexed", None)
         if tenant is None:
             self._catalog.clear()
+            self.results.clear()
+            if indexed is not None:
+                indexed.clear()
         else:
-            self._catalog.pop((tenant, name), None)
+            self._catalog.pop((tenant, name), None)  # (its results are keyed by its generation and creation time)
+            if indexed is not None:  # dropped or created: a new collection of that name has none of the old indexes
+                key = engine_name(tenant, name)
+                indexed.difference_update({i for i in indexed if i[0] == key})
 
     async def _catalog_row(self, tenant: str, name: str) -> dict | None:
         """The collection's catalog row (None: not a documents collection), from memory when it's fresh."""
@@ -350,15 +361,65 @@ class Documents:
 
     _filter = filter  # kept for callers and tests from before the rename
 
+    @staticmethod
+    def filter_indexes(where: dict | None) -> list[tuple[str, str]]:
+        """The payload indexes a search's filter wants: (field, schema), typed by the values it filters on."""
+        out = []
+        for k, v in (where or {}).items():
+            first = v[0] if isinstance(v, list) and v else v
+            schema = ("bool" if isinstance(first, bool) else "integer" if isinstance(first, int)
+                      else "keyword" if isinstance(first, str) else None)
+            if schema:
+                out.append(("doc" if k == "document" else f"meta.{k}", schema))
+        return out
+
+    def _index_filters(self, key: str, where: dict | None) -> None:
+        if getattr(self.vector, "engine", None) != "qdrant" or not where:
+            return
+        for field, schema in self.filter_indexes(where):
+            if (key, field) not in self.vector._indexed:
+                task = asyncio.ensure_future(self.vector.ensure_index(key, field, schema))
+                self._indexing.add(task)
+                task.add_done_callback(self._indexing.discard)
+
     async def query(self, tenant: str, collection: str, text: str, *, k: int, mode: str, where: dict | None,
                     principals: list[str] | None, role: str, graph_hops: int | None, graph_k: int = 5,
-                    rerank: bool | None = None) -> dict:
+                    rerank: bool | None = None, cache: bool = True) -> dict:
         """The top `k` search hits, then up to `graph_k` chunks connected to them in the graph (marked via=graph).
-        Every hit is checked against the catalog: only the document's live version, never one being deleted."""
+        Every hit is checked against the catalog: only the document's live version, never one being deleted. The
+        same search on an unchanged collection is answered from memory (`cache=False`: always searched)."""
+        args = dict(k=k, mode=mode, where=where, principals=principals, role=role, graph_hops=graph_hops,
+                    graph_k=graph_k, rerank=rerank)
+        if not (cache and self.results.enabled):
+            return await self._query(tenant, collection, text, **args)
+        t_start = time.perf_counter()
+        await self.collection(tenant, collection)  # exists (from the catalog cache), and the schema is current
+        gen = await self.one("SELECT generation, created_at FROM swsdb.collections WHERE tenant = %s AND name = %s",
+                             [tenant, collection])
+        if gen is None:
+            return await self._query(tenant, collection, text, **args)
+        key = (tenant, collection, gen["created_at"].timestamp(), gen["generation"], text, k, mode,
+               orjson.dumps(where, option=orjson.OPT_SORT_KEYS),
+               None if principals is None else tuple(sorted(set(principals))), role, graph_hops, graph_k, rerank)
+        hit = self.results.get(key)
+        if hit is not None:
+            took = time.perf_counter() - t_start
+            observe.QUERY_SECONDS.labels(mode, "yes" if hit["graph"]["used"] else "no").observe(took)
+            observe.ACTIVITY.query(tenant, took)
+            observe.QUERY_HITS.observe(len(hit["hits"]))
+            return {**hit, "hits": [dict(h) for h in hit["hits"]], "took_ms": round(took * 1000, 1), "cached": True}
+        out = await self._query(tenant, collection, text, **args)
+        self.results.put(key, {**out, "hits": [dict(h) for h in out["hits"]]})
+        return out
+
+    async def _query(self, tenant: str, collection: str, text: str, *, k: int, mode: str, where: dict | None,
+                     principals: list[str] | None, role: str, graph_hops: int | None, graph_k: int,
+                     rerank: bool | None) -> dict:
         t_start = time.perf_counter()
         coll = await self.collection(tenant, collection)
         key = engine_name(tenant, collection)
         flt = self.filter(principals, role, where)
+        self._index_filters(key, where)
         rerank = self.s.rerank if rerank is None else rerank
         fetch = max(k * 4, 20) if rerank else k * 2  # head-room for the catalog check, and candidates to re-rank
         pre = max(fetch * 2, 20)
@@ -443,22 +504,25 @@ class Documents:
         async def q(cypher: str) -> list:
             return (await g.query(key, cypher, {"ids": ids}, read_only=True, timeout_s=30))["rows"]
 
-        for src, dst in await q("MATCH (c:Chunk)-[:NEXT]-(n:Chunk) WHERE c.id IN $ids RETURN c.id, n.id"):
+        # the queries don't depend on each other: they run at the same time
+        adjacent, shared_entities, *related = await asyncio.gather(
+            q("MATCH (c:Chunk)-[:NEXT]-(n:Chunk) WHERE c.id IN $ids RETURN c.id, n.id"),
+            # one row per (passage, neighbouring passage), with the entities they share, best first: the graph
+            # engine groups and ranks, so an entity many passages mention (a hub) can't flood the reply with rows
+            # only to be thrown away here (only the best 100 candidates are kept below)
+            q("MATCH (c:Chunk)-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(n:Chunk) WHERE c.id IN $ids AND n.id <> c.id "
+              "WITH c.id AS src, n.id AS dst, collect(DISTINCT e.name) AS names "
+              "RETURN src, dst, names ORDER BY size(names) DESC LIMIT 300"),
+            *([q("MATCH (c:Chunk)-[:MENTIONS]->(a:Entity)-[rel:RELATED]-(b:Entity)<-[:MENTIONS]-(n:Chunk) "
+                 "WHERE c.id IN $ids AND n.id <> c.id RETURN c.id, n.id, a.name, rel.type, b.name LIMIT 500")]
+              if hops >= 2 else []))
+        for src, dst in adjacent:
             offer(src, dst, "next", ["adjacent passage"])
-        # one row per (passage, neighbouring passage), with the entities they share, best first: the graph engine
-        # groups and ranks, so an entity many passages mention (a hub) can't flood the reply with rows only to be
-        # thrown away here (only the best 100 candidates are kept below)
-        for src, dst, names in await q("MATCH (c:Chunk)-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(n:Chunk) "
-                                       "WHERE c.id IN $ids AND n.id <> c.id "
-                                       "WITH c.id AS src, n.id AS dst, collect(DISTINCT e.name) AS names "
-                                       "RETURN src, dst, names ORDER BY size(names) DESC LIMIT 300"):
+        for src, dst, names in shared_entities:
             shared = names if isinstance(names, list) else [names]
             offer(src, dst, "entity", [f"mentions {', '.join(sorted(shared)[:3])}"], len(shared))
-        if hops >= 2:
-            for src, dst, a, typ, b in await q("MATCH (c:Chunk)-[:MENTIONS]->(a:Entity)-[rel:RELATED]-(b:Entity)"
-                                               "<-[:MENTIONS]-(n:Chunk) WHERE c.id IN $ids AND n.id <> c.id "
-                                               "RETURN c.id, n.id, a.name, rel.type, b.name LIMIT 500"):
-                offer(src, dst, "relation", [f"{a} {typ} {b}"])
+        for src, dst, a, typ, b in (related[0] if related else []):
+            offer(src, dst, "relation", [f"{a} {typ} {b}"])
         if not cand:
             return []
         top = sorted(cand.items(), key=lambda kv: kv[1][0], reverse=True)[:100]

@@ -115,7 +115,7 @@ class Evaluator:
                 res = await self.d.query(tenant, collection, c["query"], k=k, mode=cfg.get("mode", "hybrid"),
                                          where=cfg.get("where"), principals=principals, role=role,
                                          graph_hops=cfg.get("graph_hops", 0), graph_k=cfg.get("graph_k", 5),
-                                         rerank=cfg.get("rerank", False))
+                                         rerank=cfg.get("rerank", False), cache=False)
                 latencies.append(time.perf_counter() - q0)
                 hits = res["hits"]
                 sc = score_case([h["document"] for h in hits], [h["text"] for h in hits], c["relevant"], c["answer"])

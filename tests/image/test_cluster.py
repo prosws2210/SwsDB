@@ -139,3 +139,52 @@ def test_a_snapshot_on_one_server_holds_the_other_s_writes(pair):
     assert {p["id"] for p in b.collection("raw").get([1, 2])} == {1}
     assert wait_for(lambda: b.reconcile()["issues"] == 0, timeout=120)
     assert b.collection("kb").cypher("RETURN 1", read_only=True)["rows"] == [[1]]
+
+
+@pytest.fixture(scope="module")
+def workers():
+    """One server with two worker processes (SWSDB_WORKERS): each one is a server of the cluster on one volume."""
+    vol = f"swsdb-workers-{uuid.uuid4().hex[:8]}"
+    box = test_container.Box(vol, {"SWSDB_API_KEY": "workers-admin-key", "SWSDB_WORKERS": "2"})
+    box.start()
+    try:
+        box.wait_ready(timeout=180)
+        yield box
+    finally:
+        box.remove()
+        sh("docker", "volume", "rm", "-f", vol, check=False)
+
+
+def test_workers_are_servers_of_one_volume(workers):
+    db = SwsDB(f"http://127.0.0.1:{workers.port}", api_key="workers-admin-key", timeout=120)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        c = db._call("GET", "/v1/status")["cluster"]
+        if len(c["servers"]) == 2:
+            break
+        time.sleep(0.5)
+    assert len(c["servers"]) == 2, c
+    hosts = {s["id"].split("/")[0] for s in c["servers"]}
+    assert len(hosts) == 1 and all("/" in s["id"] for s in c["servers"])
+    assert "warning" not in c  # uploads on disk are fine: both workers use the same volume
+
+
+def test_a_change_on_one_worker_holds_on_every_worker(workers):
+    """Requests go to either worker: a new key works, and a deleted document is gone, wherever they land, even
+    right after the same search was answered from a worker's cache."""
+    db = SwsDB(f"http://127.0.0.1:{workers.port}", api_key="workers-admin-key", tenant="acme", timeout=300)
+    made = db.create_key("read", "spread")
+    ro = SwsDB(f"http://127.0.0.1:{workers.port}", api_key=made["key"], tenant="acme", timeout=60)
+    db._call("PUT", "/v1/collections/spread", {"documents": True})
+    db._call("POST", "/v1/collections/spread/documents/text",
+             {"id": "kiwi", "text": "Kiwi Harbour opens its gates at dawn."})
+    deadline = time.time() + 600
+    while db._call("GET", "/v1/collections/spread/documents/kiwi")["status"] != "ready":
+        assert time.time() < deadline
+        time.sleep(0.5)
+    body = {"query": "Kiwi Harbour gates", "k": 3}
+    for _ in range(8):  # warm both workers' caches
+        assert [h["document"] for h in ro._call("POST", "/v1/collections/spread/query", body)["hits"]] == ["kiwi"]
+    db._call("DELETE", "/v1/collections/spread/documents/kiwi")
+    for _ in range(12):
+        assert ro._call("POST", "/v1/collections/spread/query", body)["hits"] == []

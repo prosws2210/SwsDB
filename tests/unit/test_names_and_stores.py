@@ -97,3 +97,102 @@ def test_worker_processes_are_not_separate_servers_for_the_uploads_warning():
     assert "warning" not in c.status()
     c.peers.append({"id": "other", "version": "x", "files": "disk", "seen_s": 0.0})
     assert "SWSDB_FILES=postgres" in c.status()["warning"]
+
+
+def test_dense_searches_get_the_search_breadth_and_sparse_ones_do_not():
+    from swsdb_server.stores import VectorStore
+
+    v = VectorStore("http://qdrant", "k", ef=128)
+    assert v._with_ef({"query": [0.1], "limit": 10})["params"] == {"hnsw_ef": 128}
+    assert v._with_ef({"query": [0.1], "limit": 500})["params"] == {"hnsw_ef": 500}  # never below the limit
+    assert v._with_ef({"query": [0.1], "params": {"exact": True}})["params"] == {"exact": True}  # the caller's own
+    assert "params" not in v._with_ef({"query": {"indices": [1], "values": [1.0]}, "using": "sparse"})
+    hybrid = v._with_ef({"prefetch": [{"query": [0.1], "using": "dense", "limit": 40},
+                                      {"query": {"indices": [1], "values": [1.0]}, "using": "sparse", "limit": 40}],
+                         "query": {"fusion": "rrf"}, "limit": 10})
+    assert "params" not in hybrid and hybrid["prefetch"][0]["params"] == {"hnsw_ef": 128}
+    assert "params" not in hybrid["prefetch"][1]
+    assert "params" not in VectorStore("http://qdrant", "k", ef=0)._with_ef({"query": [0.1]})
+    assert "params" not in v._with_ef({"filter": {}, "limit": 5})  # no search at all
+
+
+def test_a_documents_filter_asks_for_indexes_typed_by_its_values():
+    from swsdb_server.documents import Documents
+
+    assert Documents.filter_indexes({"team": "support", "year": [2024, 2025], "public": True, "document": "a.pdf"}) == [
+        ("meta.team", "keyword"), ("meta.year", "integer"), ("meta.public", "bool"), ("doc", "keyword")]
+    assert Documents.filter_indexes({"x": [], "y": 1.5}) == [] and Documents.filter_indexes(None) == []
+
+
+def test_result_cache_is_bounded_expires_and_clears(monkeypatch):
+    from swsdb_server import cache
+
+    now = [100.0]
+    monkeypatch.setattr(cache.time, "monotonic", lambda: now[0])
+    c = cache.ResultCache(size=2, ttl_s=10)
+    c.put("a", 1)
+    c.put("b", 2)
+    assert c.get("a") == 1  # "a" is now the most recently used
+    c.put("c", 3)
+    assert c.get("b") is None and c.get("a") == 1 and c.get("c") == 3
+    now[0] += 11
+    assert c.get("a") is None and len(c) == 1  # expired entries go when looked up
+    c.clear()
+    assert len(c) == 0
+    off = cache.ResultCache(size=0, ttl_s=10)
+    off.put("a", 1)
+    assert not off.enabled and off.get("a") is None
+
+
+def test_questions_arriving_together_share_one_model_call():
+    import asyncio
+    import time as _time
+
+    from swsdb_server.embed import Embedder
+
+    e = Embedder("local", query_cache=0)
+    calls = []
+
+    def fake(texts, query):
+        calls.append(list(texts))
+        _time.sleep(0.05)  # the model is busy: the others queue meanwhile
+        return [[float(len(t))] for t in texts]
+
+    e._local_dense = fake
+
+    async def go():
+        return await asyncio.gather(*(e.dense([q], query=True) for q in ["a", "bb", "ccc", "bb", "dddd"]))
+    out = asyncio.run(go())
+    assert out == [[[1.0]], [[2.0]], [[3.0]], [[2.0]], [[4.0]]]
+    assert calls == [["a", "bb", "ccc", "dddd"]]  # one call, the duplicate embedded once
+    calls.clear()
+
+    async def staggered():
+        first = asyncio.ensure_future(e.dense(["one"], query=True))
+        await asyncio.sleep(0.01)  # the model is now busy with "one"
+        rest = await asyncio.gather(*(e.dense([q], query=True) for q in ["two", "three"]))
+        return [await first, *rest]
+    assert asyncio.run(staggered()) == [[[3.0]], [[3.0]], [[5.0]]]
+    assert calls == [["one"], ["two", "three"]]  # those that came while it was busy went in together
+
+    def broken(texts, query):
+        raise RuntimeError("model failed")
+    e._local_dense = broken
+    try:
+        asyncio.run(e.dense(["x"], query=True))
+    except RuntimeError as err:
+        assert "model failed" in str(err)
+    else:
+        raise AssertionError("the model's error should reach the caller")
+
+
+def test_nothing_migrates_the_database_while_a_restore_replaces_it():
+    """A heartbeat or an outbox poll during pg_restore must not create swsdb's schema in the empty database."""
+    import asyncio
+
+    from swsdb_server.stores import SqlStore, Unavailable
+
+    s = SqlStore("/nonexistent")  # never connects: the refusal comes first
+    s.restoring = True
+    with pytest.raises(Unavailable, match="being restored"):
+        asyncio.run(s.migrate())
