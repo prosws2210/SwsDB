@@ -25,9 +25,10 @@ ROLES = ("admin", "read")
 
 @dataclass(frozen=True)
 class Caller:
-    role: str  # "admin" (read and write) or "read" (read and search only)
+    role: str  # "admin" (read and write), "read" (read and search only) or "user" (a signed-in end user)
     tenant: str | None  # None: every tenant (keys from the environment, or no keys configured)
     key_id: str | None = None  # a managed key's id
+    user: object = None  # the EndUser, for role "user"
 
     @property
     def is_global(self) -> bool:

@@ -58,6 +58,10 @@ Document ids may contain `/`; encode them in the path (`a%2Fb`).
 | `PUT /v1/collections/{name}/points` | `{"points": [{"id", "vector", "payload"}]}` (up to 1000) |
 | `POST /v1/collections/{name}/points/get` | `{"ids": [...]}` |
 | `GET /v1/collections/{name}/facets` | documents by status, by metadata field and value, and by day added; `?meta=` narrows the counts |
+| `GET /v1/sql/saved`, `PUT /v1/sql/saved/{name}`, `DELETE /v1/sql/saved/{name}` | SQL queries saved for the tenant (`{"query": "...", "pinned": true}`; `pinned` shows it on Reports, and leaving it out keeps it); saving and deleting need the admin key |
+| `GET /v1/collections/{name}/original/{id}` | the document's file as uploaded (live version), as a download (`application/octet-stream`), admin |
+| `GET /v1/logs` | recent API requests on this server, newest first, and time per route (`?status=4xx&route=query&min_ms=100&limit=200`), admin; a tenant's key sees its tenant |
+| `GET /v1/advisors` | security and performance findings (`level`, `title`, `detail`, `fix`, `items`), admin; server-wide checks need a key from the environment |
 | `GET /v1/activity` | searches and documents indexed per minute on this server over the last hour (`?minutes=`), and search latency; a tenant's key sees its tenant |
 | `POST /v1/collections/{name}/points/scroll` | `{"limit": 50, "offset": null, "where": {...}, "with_vector": false}`: a page of points in id order, and `next` for the following page |
 | `POST /v1/collections/{name}/points/delete` | `{"ids": [...]}` |
@@ -70,6 +74,81 @@ On documents collections, search, points/get, points/scroll and Cypher need the 
 
 `POST /v1/sql` with `{"query", "params", "read_only", "timeout_s", "max_rows"}`: one statement, in the tenant's own
 schema. `params` are `%s` (a list) or `%(name)s` (an object) placeholders.
+
+`GET /v1/query-stats` (admin) lists the SQL statements that took the most time, from Postgres's `pg_stat_statements`
+(values show as `$1`, never the data): `?order=total|mean|calls|rows&limit=50`. A tenant's key sees its own roles; a
+key from the environment sees every role, swsdb's own work included, and may `POST /v1/query-stats/reset`.
+
+## End users (Auth)
+
+Your app's users sign in with email and password and send the access token as `Authorization: Bearer <token>`. A
+request with a token acts as that user: search and answers see the documents the user may read (readers
+`user:<id>`, `group:<name>` and `*`; passing `principals` is refused), tables and functions are reached only through
+the Data API under the table's policies, and files only in the user's own Storage folder. Users never send SQL, so
+they can't change who they are. Key-only routes (collections admin, SQL, keys, backups...) answer 403 to a token.
+
+| | |
+|---|---|
+| `POST /v1/auth/signup` | `{"email", "password", "tenant"}` → an access token; only when sign-up is open; no key needed |
+| `POST /v1/auth/token` | `{"email", "password", "tenant"}` → `{"access_token", "token_type", "expires_in", "user"}`; no key needed; 10 failures in 5 minutes give 429 |
+| `GET /v1/auth/user` | who the token belongs to: id, email, groups and principals |
+| `GET /v1/auth/users` | the tenant's users (`?q=` part of an email, `limit`, `offset`), admin |
+| `POST /v1/auth/users` | `{"email", "password", "groups", "metadata"}` create a user, admin |
+| `PATCH /v1/auth/users/{id}` | `{"groups", "disabled", "password"}`, admin; a disabled or deleted user's tokens stop working at once |
+| `DELETE /v1/auth/users/{id}` | admin |
+| `GET`, `PUT /v1/auth/settings` | `{"signup": false, "token_ttl_s": 3600}` (60 seconds to 30 days), admin |
+| `POST /v1/auth/settings/rotate` | a new signing secret: every token issued so far stops working, on every server, admin |
+
+Passwords are hashed with scrypt; tokens are HS256 JWTs signed with a secret kept per tenant. `tenant` in the body (or
+the `swsdb-tenant` header) picks the tenant; it is `default` otherwise.
+
+## Data API and functions
+
+| | |
+|---|---|
+| `GET /v1/rest/{table}` | rows: `?select=a,b&col=eq.value&order=col.desc&limit=100&offset=0&count=exact` |
+| `POST /v1/rest/{table}` | insert an object or a list (up to 1000); returns the rows as stored |
+| `PATCH /v1/rest/{table}?col=eq.value` | change the matching rows (a filter is required) |
+| `DELETE /v1/rest/{table}?col=eq.value` | delete the matching rows (a filter is required) |
+| `POST /v1/rpc/{function}` | call a SQL function with named arguments `{"arg": value}` |
+
+Filters are `eq.`, `neq.`, `gt.`, `gte.`, `lt.`, `lte.`, `like.`, `ilike.`, `is.null` (or `true`, `false`),
+`not.is.null` and `in.(a,b,c)`; several filters combine with AND. `limit` is at most 1000.
+
+A key sees every row of the tenant's tables. A signed-in user reaches only tables and functions **exposed** to users,
+as the tenant's users role, so Postgres row-level security decides which rows; policies read who is asking with
+`swsdb_auth.uid()`, `swsdb_auth.email()` and `swsdb_auth.groups()`.
+
+| | |
+|---|---|
+| `GET /v1/policies` | tables (row-level security on, exposed, policies) and functions users may call, admin |
+| `PUT /v1/policies/tables/{table}` | `{"exposed": true}` expose a table to users (turns row-level security on), admin |
+| `POST /v1/policies/tables/{table}` | `{"name", "command": "ALL"/"SELECT"/"INSERT"/"UPDATE"/"DELETE", "using", "check"}` add a policy, admin |
+| `DELETE /v1/policies/tables/{table}/{policy}` | drop a policy, admin |
+| `PUT /v1/policies/functions/{function}` | `{"exposed": true}` let users call a function, admin |
+
+A table exposed with no policy shows users nothing.
+
+## Storage
+
+Files in buckets, per tenant, kept in Postgres (so snapshots, restores and several servers include them).
+
+| | |
+|---|---|
+| `GET /v1/storage/buckets` | buckets with their file count and size |
+| `POST /v1/storage/buckets` | `{"name", "public": false}`, admin |
+| `PATCH /v1/storage/buckets/{bucket}` | `{"public": true}`, admin |
+| `DELETE /v1/storage/buckets/{bucket}` | admin; a bucket holding files needs `?force=true` |
+| `GET /v1/storage/{bucket}` | files (`?prefix=`) |
+| `PUT /v1/storage/{bucket}/{path}` | upload the request body as the file (its Content-Type is kept; at most `SWSDB_MAX_UPLOAD_MB`) |
+| `GET /v1/storage/{bucket}/{path}` | download |
+| `DELETE /v1/storage/{bucket}/{path}` | delete |
+
+The admin key does everything in its tenant, the read key lists and downloads. A signed-in user lists, uploads,
+downloads and deletes in their own folder (`<user id>/...`) of any bucket, and lists and downloads everything in a
+**public** bucket. Public means every key and user of the tenant, never anonymous visitors. Downloads come as
+attachments with `nosniff` and a sandboxing Content-Security-Policy (common images are shown inline), so an uploaded
+HTML or SVG file never runs as a page.
 
 ## Administration
 

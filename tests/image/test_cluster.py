@@ -81,14 +81,15 @@ def test_the_other_server_takes_over_queued_work_when_one_stops(pair):
     """Server a accepts uploads and stops at once: b processes them from Postgres (it can't read a's volume)."""
     a, b = pair["a"], pair["b"]
     kb = a.collection("kb")
-    docs = {f"note-{i}": f"Note {i}: the Kestrel {i} drone ships from depot {i * 7}." for i in range(12)}
+    # more than a can index before it stops (it indexes quickly on fast machines), so some are left for b
+    docs = {f"note-{i}": f"Note {i}: the Kestrel {i} drone ships from depot {i * 7}." for i in range(150)}
     for doc, text in docs.items():
         kb.add_text(doc, text)
     sh("docker", "stop", "-t", "2", pair["names"][0], timeout=60)
     try:
         for doc in docs:
             b.collection("kb").wait_ready(doc, timeout=300)
-        assert b.collection("kb").query("Kestrel 5 drone depot", k=1)[0]["document"] == "note-5"
+        assert b.collection("kb").query("the Kestrel 5 drone ships from depot 35", k=1)[0]["document"] == "note-5"
         done_by_b = sh("docker", "logs", pair["names"][1], check=False).count("ready default/kb/note-")
         assert done_by_b >= 1, "server b processed none of the uploads a accepted"
         assert wait_for(lambda: b.status()["cluster"]["leader"], timeout=60)  # and b runs the schedule now

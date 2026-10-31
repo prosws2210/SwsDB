@@ -152,3 +152,57 @@ def test_disabled_engine_gives_a_clear_error():
     finally:
         b.remove()
         sh("docker", "volume", "rm", "-f", vol, check=False)
+
+
+def test_saved_queries_logs_and_advisors(box):
+    """What the console's SQL editor, Logs and Advisors pages read."""
+    d = db(box)
+    d.sql("CREATE TABLE IF NOT EXISTS adv_parent (id int PRIMARY KEY)")
+    d.sql("CREATE TABLE IF NOT EXISTS adv_child (pid int REFERENCES adv_parent (id), note text)")  # no key, no index
+    d._call("PUT", "/v1/sql/saved/top%20parents", {"query": "SELECT * FROM adv_parent LIMIT 10"})
+    d._call("PUT", "/v1/sql/saved/top%20parents", {"query": "SELECT * FROM adv_parent LIMIT 5"})  # replaces
+    saved = d._call("GET", "/v1/sql/saved")["queries"]
+    assert [(q["name"], q["query"]) for q in saved if q["name"] == "top parents"] == \
+        [("top parents", "SELECT * FROM adv_parent LIMIT 5")]
+    assert err(lambda: d._call("PUT", "/v1/sql/saved/%20x", {"query": "SELECT 1"})).status == 422
+    d._call("DELETE", "/v1/sql/saved/top%20parents")
+    assert err(lambda: d._call("DELETE", "/v1/sql/saved/top%20parents")).status == 404
+
+    err(lambda: d._call("GET", "/v1/collections/nope-missing"))  # a 404 for the log
+    logs = d._call("GET", "/v1/logs?limit=50")
+    assert logs["entries"] and all(set(e) >= {"at", "method", "route", "status", "ms"} for e in logs["entries"])
+    assert all("{" in e["route"] or "nope" not in e["route"] for e in logs["entries"])  # templates, not raw paths
+    misses = d._call("GET", "/v1/logs?status=4xx")["entries"]
+    assert misses and all(400 <= e["status"] < 500 for e in misses)
+    assert any(r["route"] == "/v1/sql/saved/{qname}" for r in logs["routes"])
+
+    adv = d._call("GET", "/v1/advisors")
+    checks = {f["check"]: f for f in adv["findings"]}
+    assert "adv_child" in checks["no_primary_key"]["items"]
+    assert any("adv_child" in x for x in checks["unindexed_foreign_keys"]["items"])
+    assert adv["counts"]["error"] + adv["counts"]["warning"] + adv["counts"]["info"] == len(adv["findings"])
+    assert all(f["fix"] and f["detail"] for f in adv["findings"])
+
+
+def test_a_tenant_key_sees_only_its_saved_queries_logs_and_findings(box):
+    root = db(box)
+    root._call("PUT", "/v1/sql/saved/acme-only", {"query": "SELECT 'acme'"})  # tenant acme (the client's default)
+    other = SwsDB(f"http://127.0.0.1:{box.port}", api_key=root.create_key("admin", "beta-admin", tenant="beta")["key"])
+    assert all(q["name"] != "acme-only" for q in other._call("GET", "/v1/sql/saved")["queries"])
+    other.sql("SELECT 1")
+    entries = other._call("GET", "/v1/logs?limit=500")["entries"]
+    assert entries and {e["tenant"] for e in entries} == {"beta"}
+    adv = other._call("GET", "/v1/advisors")
+    assert adv["scope"] == "tenant" and adv["tenant"] == "beta"
+    assert not {"open_api", "native_ports", "no_backups"} & {f["check"] for f in adv["findings"]}  # server-wide checks
+    assert err(lambda: SwsDB(f"http://127.0.0.1:{box.port}", api_key=READ)._call("GET", "/v1/logs")).status == 403
+
+
+def test_saved_queries_can_be_pinned_for_reports(box):
+    d = db(box)
+    d._call("PUT", "/v1/sql/saved/daily", {"query": "SELECT 1 AS n"})
+    assert [q["pinned"] for q in d._call("GET", "/v1/sql/saved")["queries"] if q["name"] == "daily"] == [False]
+    d._call("PUT", "/v1/sql/saved/daily", {"query": "SELECT 1 AS n", "pinned": True})
+    d._call("PUT", "/v1/sql/saved/daily", {"query": "SELECT 2 AS n"})  # editing the query keeps the pin
+    q = next(q for q in d._call("GET", "/v1/sql/saved")["queries"] if q["name"] == "daily")
+    assert q["pinned"] is True and q["query"] == "SELECT 2 AS n"

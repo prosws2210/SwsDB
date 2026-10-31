@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from . import answer as answer_mod
 from . import observe
+from .advisors import run_advisors
 from .auth import Caller
-from .documents import Documents
+from .dataapi import query_stats, roles_of
+from .documents import Documents, doc_uuid
 from .evaluate import Evaluator
 from .names import DEFAULT_TENANT, NameError_, check, engine_name
 from .neo4j import refuse_pass_through
 from .stores import (
+    Forbidden,
     GraphStore,
     NotFound,
     SqlStore,
@@ -29,6 +33,47 @@ from .stores import (
 )
 
 MAX_POINTS = 1000
+
+
+class FailedSignIns:
+    """Failed sign-ins per (tenant, email, address) in the last few minutes: past the limit, sign-in waits."""
+
+    def __init__(self, limit: int = 10, window_s: float = 300):
+        self.limit, self.window_s = limit, window_s
+        self.fails: dict[tuple, list[float]] = {}
+
+    def _recent(self, key: tuple) -> list[float]:
+        now = time.time()
+        recent = [x for x in self.fails.get(key, []) if now - x < self.window_s]
+        if recent:
+            self.fails[key] = recent
+        else:
+            self.fails.pop(key, None)
+        return recent
+
+    def blocked(self, key: tuple) -> bool:
+        return len(self._recent(key)) >= self.limit
+
+    def add(self, key: tuple) -> None:
+        self.fails.setdefault(key, []).append(time.time())
+        if len(self.fails) > 50_000:  # forget the oldest rather than grow without bound
+            for k in list(self.fails)[:10_000]:
+                self.fails.pop(k, None)
+
+
+SIGNIN_FAILS = FailedSignIns()
+
+
+async def json_body(request: Request, default: Any = None) -> Any:
+    raw = await request.body()
+    if not raw:
+        if default is not None:
+            return default
+        raise HTTPException(422, "send a JSON body")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(422, f"the body is not JSON: {e}") from None
 
 
 # ------------------------------------------------------------------ request bodies
@@ -64,6 +109,59 @@ class Browse(BaseModel):
     offset: str | int | None = None  # the `next` of the previous page
     where: dict[str, Any] | None = None
     with_vector: bool = False
+
+
+class SignUp(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=200)
+    tenant: str | None = None
+
+
+class SignIn(SignUp):
+    pass
+
+
+class NewUser(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=200)
+    groups: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class UserChange(BaseModel):
+    groups: list[str] | None = None
+    disabled: bool | None = None
+    password: str | None = Field(None, max_length=200)
+
+
+class AuthSettings(BaseModel):
+    signup: bool | None = None
+    token_ttl_s: int | None = Field(None, ge=60, le=2_592_000)
+
+
+class Expose(BaseModel):
+    exposed: bool
+
+
+class NewPolicy(BaseModel):
+    name: str = Field(min_length=1, max_length=63)
+    command: str = "ALL"
+    using: str | None = Field(None, max_length=4000)
+    check: str | None = Field(None, max_length=4000)
+
+
+class NewBucket(BaseModel):
+    name: str
+    public: bool = False
+
+
+class BucketChange(BaseModel):
+    public: bool
+
+
+class SavedQuery(BaseModel):
+    query: str = Field(min_length=1, max_length=100_000)
+    pinned: bool | None = None  # shown on the Reports page; unset keeps what it was
 
 
 class Search(BaseModel):
@@ -248,14 +346,23 @@ def router(caller) -> APIRouter:
     r = APIRouter(prefix="/v1")
 
     async def require_key(c: Caller = Depends(caller)) -> str:
+        if c.role == "user":
+            raise HTTPException(403, "signed-in users reach /v1/rest, /v1/rpc, /v1/storage and document search and "
+                                     "answers; this needs an API key")
         return c.role
 
+    async def member(c: Caller = Depends(caller)) -> Caller:
+        """A key, or a signed-in end user of the tenant."""
+        return c
+
     def admin(c: Caller = Depends(caller)) -> str:
+        if c.role == "user":
+            raise HTTPException(403, "this needs an admin API key, not a user's sign-in")
         if c.role != "admin":
             raise HTTPException(403, "this needs the admin API key; the read-only key can only read and search")
         return c.role
 
-    def tenant(swsdb_tenant: str | None = Header(None), c: Caller = Depends(caller)) -> str:
+    def tenant(request: Request, swsdb_tenant: str | None = Header(None), c: Caller = Depends(caller)) -> str:
         """The request's tenant: the `swsdb-tenant` header, else the key's tenant, else `default`. A tenant's key
         reaches only its own tenant."""
         try:
@@ -264,6 +371,7 @@ def router(caller) -> APIRouter:
             raise HTTPException(422, str(e)) from None
         if c.tenant is not None and t != c.tenant:
             raise HTTPException(403, f"this key belongs to tenant {c.tenant!r} and can't reach tenant {t!r}")
+        request.state.tenant = t  # for the request log
         return t
 
     def not_in_maintenance(request: Request) -> None:
@@ -505,9 +613,15 @@ def router(caller) -> APIRouter:
 
     @r.post("/collections/{name}/query", tags=["documents"])
     async def query(body: Query, name: str = Depends(collection_name), t: str = Depends(tenant),
-                    e: Engines = Depends(), role: str = Depends(require_key)):
-        """Hybrid retrieval (dense + BM25, fused) with optional graph expansion, filtered by who is asking."""
-        if body.principals is not None and role != "admin":
+                    e: Engines = Depends(), c: Caller = Depends(member)):
+        """Hybrid retrieval (dense + BM25, fused) with optional graph expansion, filtered by who is asking. A signed-in
+        user sees the documents they may read (readers user:<id>, their groups and *)."""
+        role = c.role
+        if role == "user":
+            if body.principals is not None:
+                raise HTTPException(403, "a signed-in user searches as themself")
+            body.principals, role = c.user.principals, "read"
+        elif body.principals is not None and role != "admin":
             raise HTTPException(403, "only the admin key may act for principals; a read-only key sees public "
                                      "documents only")
         if body.graph_hops and not e.has("graph"):
@@ -519,9 +633,14 @@ def router(caller) -> APIRouter:
 
     @r.post("/collections/{name}/answer", tags=["documents"])
     async def answer(body: Ask, request: Request, name: str = Depends(collection_name), t: str = Depends(tenant),
-                     e: Engines = Depends(), role: str = Depends(require_key)):
+                     e: Engines = Depends(), c: Caller = Depends(member)):
         """A short answer that cites the passages it uses as [n], from what the caller may read only."""
-        if body.principals is not None and role != "admin":
+        role = c.role
+        if role == "user":
+            if body.principals is not None:
+                raise HTTPException(403, "a signed-in user asks as themself")
+            body.principals, role = c.user.principals, "read"
+        elif body.principals is not None and role != "admin":
             raise HTTPException(403, "only the admin key may act for principals")
         if body.graph_hops and not e.has("graph"):
             raise HTTPException(409, "graph_hops needs the graph engine")
@@ -561,6 +680,23 @@ def router(caller) -> APIRouter:
         if who is not None and role != "admin":
             raise HTTPException(403, "only the admin key may act for principals")
         return await e.docs.text(t, name, doc_id, role, who)
+
+    @r.get("/collections/{name}/original/{doc_id:path}", tags=["documents"])
+    async def document_original(doc_id: str, name: str = Depends(collection_name), t: str = Depends(tenant),
+                                e: Engines = Depends(), _: str = Depends(admin)):
+        """The file as it was uploaded (its live version, or the version being processed). Always a download:
+        an uploaded HTML file is never shown as a page."""
+        doc = await e.docs.one("SELECT * FROM swsdb.documents WHERE id = %s",
+                               [doc_uuid(t, name, doc_id)])
+        if doc is None:
+            raise NotFound(f"document {doc_id!r} not found in {name!r}")
+        data = await e.docs.original(doc, doc["live_version"] or doc["version"])
+        if data is None:
+            raise NotFound(f"the original file of {doc_id!r} is no longer kept")
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", doc["filename"] or f"{doc_id}{doc['kind']}")[:120] or "document"
+        return Response(data, media_type="application/octet-stream",
+                        headers={"content-disposition": f'attachment; filename="{safe}"',
+                                 "x-content-type-options": "nosniff"})
 
     # -------------------------------------------------------------- evaluation and diagnosis
 
@@ -741,11 +877,265 @@ def router(caller) -> APIRouter:
             for row in await sql.rows("SELECT tenant, count(*) AS n FROM swsdb.api_keys WHERE revoked_at IS NULL "
                                       "GROUP BY tenant"):
                 entry(row["tenant"])["keys"] = row["n"]
-            for row in await sql.rows("SELECT tenant FROM swsdb.sql_tenants"):
+            for row in await sql.rows("SELECT tenant FROM swsdb.sql_tenants WHERE right(tenant, 3) <> '__u'"):
                 entry(row["tenant"])["sql"] = True
         return {"tenants": [{**v, "collections": sorted(v["collections"])} for _, v in sorted(out.items())]}
 
     # -------------------------------------------------------------- managed API keys
+
+    # -------------------------------------------------------------- saved queries, logs, advisors
+
+    @r.get("/sql/saved", tags=["sql"])
+    async def saved_queries(t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(require_key)):
+        """SQL queries saved from the console for this tenant."""
+        rows = await e.sql.rows("SELECT name, query, pinned, created_at, updated_at FROM swsdb.saved_queries "
+                                "WHERE tenant = %s ORDER BY name", [t])
+        return {"queries": [{**r, "created_at": r["created_at"].isoformat(), "updated_at": r["updated_at"].isoformat()}
+                            for r in rows]}
+
+    @r.put("/sql/saved/{qname}", tags=["sql"])
+    async def save_query(qname: str, body: SavedQuery, t: str = Depends(tenant), e: Engines = Depends(),
+                         _: str = Depends(admin)):
+        if not 1 <= len(qname) <= 120 or qname.strip() != qname:
+            raise HTTPException(422, "a query name is 1-120 characters, without leading or trailing spaces")
+        await e.sql.execute(
+            "INSERT INTO swsdb.saved_queries (tenant, name, query, pinned) VALUES (%s, %s, %s, coalesce(%s, false)) "
+            "ON CONFLICT (tenant, name) DO UPDATE SET query = EXCLUDED.query, updated_at = now(), "
+            "pinned = coalesce(%s, swsdb.saved_queries.pinned)", [t, qname, body.query, body.pinned, body.pinned])
+        return {"saved": qname}
+
+    @r.delete("/sql/saved/{qname}", tags=["sql"])
+    async def delete_query(qname: str, t: str = Depends(tenant), e: Engines = Depends(), _: str = Depends(admin)):
+        rows = await e.sql.rows("DELETE FROM swsdb.saved_queries WHERE tenant = %s AND name = %s RETURNING name",
+                                [t, qname])
+        if not rows:
+            raise NotFound(f"no saved query {qname!r}")
+        return {"deleted": qname}
+
+    @r.get("/logs", tags=["admin"])
+    async def logs(limit: int = 200, status: str | None = None, route: str | None = None, min_ms: float = 0,
+                   c: Caller = Depends(caller), _: str = Depends(admin)):
+        """Recent API requests on this server (route, status, time, tenant, key id), newest first, with time per
+        route. A tenant's key sees its own tenant's requests."""
+        if not 1 <= limit <= 2000:
+            raise HTTPException(422, "limit must be 1-2000")
+        return observe.REQUESTS.query(c.tenant, limit=limit, status=status, route=route, min_ms=min_ms)
+
+    @r.get("/advisors", tags=["admin"])
+    async def advisors(request: Request, t: str = Depends(tenant), c: Caller = Depends(caller), e: Engines = Depends(),
+                       _: str = Depends(admin)):
+        """Checks for security and performance problems, each with what to do about it."""
+        return await run_advisors(request.app, t, c)
+
+    # -------------------------------------------------------------- end users (Auth)
+
+    def auth_tenant(request: Request, body_tenant: str | None) -> str:
+        try:
+            return check("tenant", body_tenant or request.headers.get("swsdb-tenant") or DEFAULT_TENANT)
+        except NameError_ as err:
+            raise HTTPException(422, str(err)) from None
+
+    def users_store(request: Request):
+        if request.app.state.endusers is None:
+            raise HTTPException(409, "end users are kept in PostgreSQL, which is not enabled")
+        return request.app.state.endusers
+
+    @r.post("/auth/signup", tags=["auth"], status_code=201)
+    async def signup(body: SignUp, request: Request):
+        """An app's end user signs up (when the tenant allows it, see /v1/auth/settings). No API key needed."""
+        t = auth_tenant(request, body.tenant)
+        users = users_store(request)
+        if not (await users.config(t))["signup"]:
+            raise HTTPException(403, "sign-up is closed for this tenant: an admin creates users")
+        u = await users.create(t, body.email, body.password)
+        return await users.token(t, {**u, "groups": u["groups"]})
+
+    @r.post("/auth/token", tags=["auth"])
+    async def sign_in(body: SignIn, request: Request):
+        """Sign in with email and password: an access token for `Authorization: Bearer`. No API key needed."""
+        t = auth_tenant(request, body.tenant)
+        ip = request.client.host if request.client else "?"
+        if SIGNIN_FAILS.blocked((t, body.email.lower(), ip)):
+            raise HTTPException(429, "too many failed sign-ins: wait a few minutes")
+        try:
+            return await users_store(request).sign_in(t, body.email, body.password)
+        except Forbidden:
+            SIGNIN_FAILS.add((t, body.email.lower(), ip))
+            raise
+
+    @r.get("/auth/user", tags=["auth"])
+    async def me(c: Caller = Depends(member)):
+        """Who the access token belongs to."""
+        if c.role != "user":
+            raise HTTPException(400, "this is for an end user's access token")
+        return {"id": c.user.id, "email": c.user.email, "groups": list(c.user.groups), "tenant": c.tenant,
+                "principals": c.user.principals}
+
+    @r.get("/auth/users", tags=["auth"])
+    async def list_users(request: Request, limit: int = 200, offset: int = 0, q: str | None = None,
+                         t: str = Depends(tenant), _: str = Depends(admin)):
+        return await users_store(request).list(t, min(max(limit, 1), 1000), max(offset, 0), q)
+
+    @r.post("/auth/users", tags=["auth"], status_code=201)
+    async def create_user(body: NewUser, request: Request, t: str = Depends(tenant), _: str = Depends(admin)):
+        return await users_store(request).create(t, body.email, body.password, body.groups, body.metadata)
+
+    @r.patch("/auth/users/{uid}", tags=["auth"])
+    async def update_user(uid: str, body: UserChange, request: Request, t: str = Depends(tenant),
+                          _: str = Depends(admin)):
+        return await users_store(request).update(t, uid, groups=body.groups, disabled=body.disabled,
+                                                 password=body.password)
+
+    @r.delete("/auth/users/{uid}", tags=["auth"])
+    async def delete_user(uid: str, request: Request, t: str = Depends(tenant), _: str = Depends(admin)):
+        await users_store(request).delete(t, uid)
+        return {"deleted": uid}
+
+    @r.get("/auth/settings", tags=["auth"])
+    async def auth_settings(request: Request, t: str = Depends(tenant), _: str = Depends(admin)):
+        c = await users_store(request).config(t)
+        return {"signup": c["signup"], "token_ttl_s": c["token_ttl_s"]}
+
+    @r.put("/auth/settings", tags=["auth"])
+    async def put_auth_settings(body: AuthSettings, request: Request, t: str = Depends(tenant),
+                                _: str = Depends(admin)):
+        out = await users_store(request).settings(t, signup=body.signup, token_ttl_s=body.token_ttl_s)
+        await request.app.state.cluster.notify("auth")
+        return out
+
+    @r.post("/auth/settings/rotate", tags=["auth"])
+    async def rotate_secret(request: Request, t: str = Depends(tenant), _: str = Depends(admin)):
+        """A new signing secret: every access token issued so far stops working at once, on every server."""
+        await users_store(request).rotate(t)
+        await request.app.state.cluster.notify("auth")
+        return {"rotated": True}
+
+    # -------------------------------------------------------------- Data API, RPC and row-level security
+
+    def data(request: Request):
+        if request.app.state.dataapi is None:
+            raise HTTPException(409, "the Data API needs PostgreSQL")
+        return request.app.state.dataapi
+
+    @r.get("/rest/{table}", tags=["data api"])
+    async def rest_select(table: str, request: Request, t: str = Depends(tenant), c: Caller = Depends(member)):
+        """Rows of a table: ?select=a,b&col=eq.value&order=col.desc&limit=100&offset=0&count=exact. Keys see every
+        row; a signed-in user sees the rows the table's policies allow (and only tables exposed to users)."""
+        return await data(request).select(t, c, table, dict(request.query_params))
+
+    @r.post("/rest/{table}", tags=["data api"], status_code=201)
+    async def rest_insert(table: str, request: Request, t: str = Depends(tenant), c: Caller = Depends(member)):
+        """Insert an object or a list of objects; returns the rows as stored."""
+        return await data(request).insert(t, c, table, await json_body(request))
+
+    @r.patch("/rest/{table}", tags=["data api"])
+    async def rest_update(table: str, request: Request, t: str = Depends(tenant), c: Caller = Depends(member)):
+        """Change the rows the filters match (at least one filter)."""
+        return await data(request).update(t, c, table, dict(request.query_params), await json_body(request))
+
+    @r.delete("/rest/{table}", tags=["data api"])
+    async def rest_delete(table: str, request: Request, t: str = Depends(tenant), c: Caller = Depends(member)):
+        """Delete the rows the filters match (at least one filter)."""
+        return await data(request).delete(t, c, table, dict(request.query_params))
+
+    @r.post("/rpc/{function}", tags=["data api"])
+    async def rpc(function: str, request: Request, t: str = Depends(tenant), c: Caller = Depends(member)):
+        """Call one of the tenant's SQL functions with named arguments ({"arg": value}). A signed-in user may call
+        only functions exposed to users."""
+        body = await json_body(request, default={})
+        return await data(request).rpc(t, c, function, body)
+
+    @r.get("/policies", tags=["data api"])
+    async def policies(request: Request, t: str = Depends(tenant), _: str = Depends(admin)):
+        """Tables (row-level security, whether users may reach them, policies) and functions users may call."""
+        return await data(request).policies(t)
+
+    @r.put("/policies/tables/{table}", tags=["data api"])
+    async def expose_table(table: str, body: Expose, request: Request, t: str = Depends(tenant),
+                           _: str = Depends(admin)):
+        await data(request).expose_table(t, table, body.exposed)
+        return {"table": table, "exposed": body.exposed}
+
+    @r.post("/policies/tables/{table}", tags=["data api"], status_code=201)
+    async def create_policy(table: str, body: NewPolicy, request: Request, t: str = Depends(tenant),
+                            _: str = Depends(admin)):
+        await data(request).create_policy(t, table, body.name, body.command, body.using, body.check)
+        return {"table": table, "policy": body.name}
+
+    @r.delete("/policies/tables/{table}/{policy}", tags=["data api"])
+    async def drop_policy(table: str, policy: str, request: Request, t: str = Depends(tenant),
+                          _: str = Depends(admin)):
+        await data(request).drop_policy(t, table, policy)
+        return {"dropped": policy}
+
+    @r.put("/policies/functions/{function}", tags=["data api"])
+    async def expose_function(function: str, body: Expose, request: Request, t: str = Depends(tenant),
+                              _: str = Depends(admin)):
+        await data(request).expose_function(t, function, body.exposed)
+        return {"function": function, "exposed": body.exposed}
+
+    @r.get("/query-stats", tags=["admin"])
+    async def query_stats_route(request: Request, limit: int = 50, order: str = "total", t: str = Depends(tenant),
+                                c: Caller = Depends(caller), e: Engines = Depends(), _: str = Depends(admin)):
+        """The SQL statements that took the most time (pg_stat_statements; values show as $1). A key from the
+        environment sees every role, swsdb's own work included; a tenant's key sees its own roles."""
+        roles = None if c.is_global else roles_of(t, await e.sql.tenant_role(t))
+        return await query_stats(e.sql, roles, min(max(limit, 1), 500), order)
+
+    @r.post("/query-stats/reset", tags=["admin"])
+    async def query_stats_reset(c: Caller = Depends(caller), e: Engines = Depends(), _: str = Depends(admin)):
+        if not c.is_global:
+            raise HTTPException(403, "resetting covers every tenant: it needs a key from the environment")
+        await e.sql.execute("SELECT pg_stat_statements_reset()")
+        return {"reset": True}
+
+    # -------------------------------------------------------------- storage
+
+    def files(request: Request):
+        if request.app.state.storage is None:
+            raise HTTPException(409, "storage needs PostgreSQL")
+        return request.app.state.storage
+
+    @r.get("/storage/buckets", tags=["storage"])
+    async def buckets(request: Request, t: str = Depends(tenant), c: Caller = Depends(member)):
+        return {"buckets": await files(request).buckets(t)}
+
+    @r.post("/storage/buckets", tags=["storage"], status_code=201)
+    async def create_bucket(body: NewBucket, request: Request, t: str = Depends(tenant), _: str = Depends(admin)):
+        return await files(request).create_bucket(t, body.name, body.public)
+
+    @r.patch("/storage/buckets/{bucket}", tags=["storage"])
+    async def update_bucket(bucket: str, body: BucketChange, request: Request, t: str = Depends(tenant),
+                            _: str = Depends(admin)):
+        return await files(request).update_bucket(t, bucket, body.public)
+
+    @r.delete("/storage/buckets/{bucket}", tags=["storage"])
+    async def delete_bucket(bucket: str, request: Request, force: bool = False, t: str = Depends(tenant),
+                            _: str = Depends(admin)):
+        return await files(request).delete_bucket(t, bucket, force)
+
+    @r.get("/storage/{bucket}", tags=["storage"])
+    async def list_files(bucket: str, request: Request, prefix: str = "", t: str = Depends(tenant),
+                         c: Caller = Depends(member)):
+        return await files(request).list(t, c, bucket, prefix)
+
+    @r.put("/storage/{bucket}/{path:path}", tags=["storage"], status_code=201)
+    async def put_file(bucket: str, path: str, request: Request, t: str = Depends(tenant),
+                       c: Caller = Depends(member)):
+        """Upload the request body as the file (Content-Type is kept). Replaces a file at the same path."""
+        data_ = await request.body()
+        return await files(request).put(t, c, bucket, path, data_, request.headers.get("content-type"))
+
+    @r.get("/storage/{bucket}/{path:path}", tags=["storage"])
+    async def get_file(bucket: str, path: str, request: Request, t: str = Depends(tenant),
+                       c: Caller = Depends(member)):
+        body, ctype, headers = await files(request).get(t, c, bucket, path)
+        return Response(body, media_type=ctype, headers=headers)
+
+    @r.delete("/storage/{bucket}/{path:path}", tags=["storage"])
+    async def delete_file(bucket: str, path: str, request: Request, t: str = Depends(tenant),
+                          c: Caller = Depends(member)):
+        return await files(request).delete(t, c, bucket, path)
 
     @r.post("/keys", tags=["keys"], status_code=201)
     async def create_key(body: NewKey, request: Request, t: str = Depends(tenant), c: Caller = Depends(caller),

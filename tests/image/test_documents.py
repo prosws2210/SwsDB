@@ -273,3 +273,21 @@ def test_listing_facets_and_activity_for_the_console(box):
     act = db._call("GET", "/v1/activity?minutes=10")
     assert len(act["minutes"]) == 10 and act["searches"] >= 1 and act["indexed"] >= 12
     assert act["latency_ms"]["p50"] is not None
+
+
+def test_the_original_file_downloads_as_uploaded(box):
+    db = client(box)
+    kb = db.create_collection("originals", documents=True)
+    page = b"<html><body><h1>Refunds</h1><p>Refunds take five days.</p><script>alert(1)</script></body></html>"
+    db._http.post("/v1/collections/originals/documents", files={"file": ("refunds.html", page, "text/html")},
+                  data={"id": "refunds"}).raise_for_status()
+    kb.wait_ready("refunds", timeout=300)
+    r = db._http.get("/v1/collections/originals/original/refunds")
+    assert r.status_code == 200 and r.content == page
+    # always a download, never rendered: an uploaded page can't run in the console's origin
+    assert r.headers["content-type"] == "application/octet-stream"
+    assert r.headers["content-disposition"] == 'attachment; filename="refunds.html"'
+    assert r.headers["x-content-type-options"] == "nosniff"
+    reader = client(box, READ)
+    assert reader._http.get("/v1/collections/originals/original/refunds").status_code == 403
+    assert db._http.get("/v1/collections/originals/original/missing").status_code == 404

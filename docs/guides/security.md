@@ -83,6 +83,26 @@ Readers are enforced inside Qdrant's search, again for every graph passage, and 
 Raw access to a documents collection (vector search, point reads, Cypher) would skip that filter, so it needs an admin
 key. See [Documents and retrieval](documents.md#permissions).
 
+## End users
+
+An app's users sign in with email and password ([Auth](../reference/api.md#end-users-auth)) and send an access token
+instead of a key. What a token can do:
+
+- **Search and answers** use the user's own principals (`user:<id>` and their groups). A token can't pass other
+  principals, so it can't ask as someone else.
+- **Tables** only through the Data API, as the tenant's users role (`swsdb_t_<tenant>__u`, no inherited rights), and
+  only tables an admin exposed. Postgres row-level security decides the rows. Users never send SQL; their id, email
+  and groups reach the policies as settings swsdb sets itself, from the verified token.
+- **Functions** only those an admin let users call. Edge-style code isn't run: a function is plain SQL or PL/pgSQL
+  in the tenant's schema, under the same role.
+- **Files** only in their own folder of each bucket, plus reading public buckets. Public is every key and user of the
+  tenant, never anonymous visitors.
+- **Nothing else.** Routes for keys (collection admin, SQL, Cypher, keys, backups, logs) answer 403 to a token.
+
+Passwords are hashed with scrypt, and failed sign-ins are rate-limited. Tokens are HS256 JWTs signed with a secret
+per tenant. Disabling or deleting a user stops their tokens at once, and rotating the secret signs everyone out. Sign-up
+is closed until an admin opens it.
+
 ## Network and TLS
 
 The engines' own ports (5432, 6333, 6379) listen on localhost inside the container unless you set

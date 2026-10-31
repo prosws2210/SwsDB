@@ -173,9 +173,58 @@ MIGRATIONS: list[str] = [
       document_id uuid NOT NULL REFERENCES swsdb.documents (id) ON DELETE CASCADE,
       version int NOT NULL, data bytea NOT NULL, PRIMARY KEY (document_id, version));
     """,
+    # 9: SQL queries saved from the console, per tenant
+    """
+    CREATE TABLE swsdb.saved_queries (
+      tenant text NOT NULL, name text NOT NULL, query text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant, name));
+    """,
+    # 10: saved queries pinned to the console's Reports page
+    """
+    ALTER TABLE swsdb.saved_queries ADD COLUMN pinned boolean NOT NULL DEFAULT false;
+    """,
+    # 11: a tenant's end users (Auth), its files (Storage), and the functions row-level security policies call
+    """
+    CREATE TABLE swsdb.auth_config (
+      tenant text PRIMARY KEY, secret bytea NOT NULL, signup boolean NOT NULL DEFAULT false,
+      token_ttl_s int NOT NULL DEFAULT 3600 CHECK (token_ttl_s BETWEEN 60 AND 2592000));
+    CREATE TABLE swsdb.end_users (
+      tenant text NOT NULL, id uuid NOT NULL, email text NOT NULL, password text NOT NULL,
+      groups text[] NOT NULL DEFAULT '{}', metadata jsonb NOT NULL DEFAULT '{}',
+      created_at timestamptz NOT NULL DEFAULT now(), last_sign_in_at timestamptz, disabled_at timestamptz,
+      PRIMARY KEY (tenant, id), UNIQUE (tenant, email));
+    CREATE TABLE swsdb.storage_buckets (
+      tenant text NOT NULL, name text NOT NULL, public boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant, name));
+    CREATE TABLE swsdb.storage_objects (
+      tenant text NOT NULL, bucket text NOT NULL, path text NOT NULL, content_type text NOT NULL,
+      size bigint NOT NULL, sha256 text NOT NULL, data bytea NOT NULL, owner text,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant, bucket, path),
+      FOREIGN KEY (tenant, bucket) REFERENCES swsdb.storage_buckets (tenant, name) ON DELETE CASCADE);
+    CREATE SCHEMA IF NOT EXISTS swsdb_auth;
+    CREATE OR REPLACE FUNCTION swsdb_auth.uid() RETURNS text LANGUAGE sql STABLE
+      AS $$ SELECT nullif(current_setting('swsdb.user_id', true), '') $$;
+    CREATE OR REPLACE FUNCTION swsdb_auth.email() RETURNS text LANGUAGE sql STABLE
+      AS $$ SELECT nullif(current_setting('swsdb.user_email', true), '') $$;
+    CREATE OR REPLACE FUNCTION swsdb_auth.groups() RETURNS text[] LANGUAGE sql STABLE
+      AS $$ SELECT coalesce(string_to_array(nullif(current_setting('swsdb.user_groups', true), ''), ','), '{}') $$;
+    GRANT USAGE ON SCHEMA swsdb_auth TO PUBLIC;
+    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA swsdb_auth TO PUBLIC;
+    """,
 ]
 
 TENANT_ROLE_PREFIX = "swsdb_t_"  # bootstrap's pg_ident map lets the server log in as any role with this prefix
+
+
+def users_role(tenant: str) -> str:
+    """The role a tenant's signed-in end users act as (Data API, RPC): no rights except what the tenant grants it,
+    and row-level security applies to it ("__" can't occur in a tenant name, so it never clashes)."""
+    name = f"{TENANT_ROLE_PREFIX}{tenant}__u"
+    if len(name) > 63:
+        name = f"{TENANT_ROLE_PREFIX}{hashlib.sha256(tenant.encode()).hexdigest()[:40]}__u"
+    return name
 
 
 def tenant_role(tenant: str) -> str:
@@ -358,6 +407,67 @@ class SqlStore:
                                "ON CONFLICT (tenant) DO NOTHING", [tenant, role])
         self._roles[tenant] = role
         return role
+
+    async def users_role(self, tenant: str) -> str:
+        """The tenant's end-users role, created on first use: it may log in and use the tenant's schema, nothing else
+        until the tenant grants it a table (see the Policies page)."""
+        owner = await self.tenant_role(tenant)
+        role = users_role(tenant)
+        if role in self._roles.values():
+            return role
+        schema = "public" if owner == APP_ROLE else owner
+        async with self.pool.connection() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(7367736463)")
+            exists = await (await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", [role])).fetchone()
+            r = pgsql.Identifier(role)
+            if not exists:
+                await conn.execute(pgsql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION "
+                                             "NOBYPASSRLS NOINHERIT CONNECTION LIMIT 20").format(r))
+            await conn.execute(pgsql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(pgsql.Identifier(schema), r))
+            await conn.execute(pgsql.SQL("ALTER ROLE {} SET search_path = {}").format(r, pgsql.Identifier(schema)))
+            await conn.execute("INSERT INTO swsdb.sql_tenants (tenant, role) VALUES (%s, %s) "
+                               "ON CONFLICT (tenant) DO NOTHING", [f"{tenant}__u", role])
+        self._roles[f"{tenant}__u"] = role
+        return role
+
+    async def query_as_user(self, tenant: str, user, statement, params, *, read_only: bool, timeout_s: float = 15,
+                            max_rows: int = 1000) -> dict:
+        """One statement swsdb wrote (the Data API, RPC), as the tenant's end-users role, with who the user is set
+        for row-level security policies (swsdb_auth.uid(), .email(), .groups())."""
+        await self.migrate()
+        role = await self.users_role(tenant)
+        try:
+            pool = self._tenant_pools.pop(role, None)
+            if pool is None:
+                pool = self._sandbox_pool(role, 4, await self._role_password(role))
+                await pool.open(wait=False)
+                while len(self._tenant_pools) >= self.MAX_TENANT_POOLS:
+                    old = self._tenant_pools.pop(next(iter(self._tenant_pools)))
+                    await old.close()
+            self._tenant_pools[role] = pool
+            async with pool.connection(timeout=10) as conn, conn.transaction():
+                if read_only:
+                    await conn.execute("SET TRANSACTION READ ONLY")
+                await conn.execute(
+                    "SELECT set_config('statement_timeout', %s, true), set_config('swsdb.user_id', %s, true), "
+                    "set_config('swsdb.user_email', %s, true), set_config('swsdb.user_groups', %s, true)",
+                    [f"{int(timeout_s * 1000)}", user.id if user else "", user.email if user else "",
+                     ",".join(user.groups) if user else ""])
+                cur = await conn.execute(statement, params or None)
+                if cur.description is None:
+                    return {"columns": [], "rows": [], "row_count": cur.rowcount, "truncated": False}
+                rows = await cur.fetchmany(max_rows + 1)
+                return {"columns": [d.name for d in cur.description],
+                        "rows": [[_json_safe(v) for v in r] for r in rows[:max_rows]],
+                        "row_count": min(len(rows), max_rows), "truncated": len(rows) > max_rows}
+        except psycopg.errors.InsufficientPrivilege as e:
+            raise Forbidden(f"not allowed for signed-in users: {str(e).splitlines()[0]}") from e
+        except psycopg.errors.QueryCanceled as e:
+            raise StoreError(f"statement timed out after {timeout_s:g}s") from e
+        except PoolTimeout as e:
+            raise Unavailable("PostgreSQL: no connection available") from e
+        except psycopg.Error as e:
+            raise StoreError(f"{type(e).__name__}: {str(e).splitlines()[0]}") from e
 
     async def _pool_for(self, tenant: str) -> AsyncConnectionPool:
         role = await self.tenant_role(tenant)

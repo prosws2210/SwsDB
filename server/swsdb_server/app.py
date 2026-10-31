@@ -23,8 +23,10 @@ from .api_v1 import router as v1_router
 from .auth import Caller, KeyStore
 from .backups import Backups
 from .cluster import Cluster
+from .dataapi import STATS_SETUP, DataApi
 from .documents import Documents
 from .embed import Embedder
+from .endusers import EndUsers
 from .extract import Extractor, NameExtractor
 from .health import Monitor, qdrant_key, qdrant_url, read_secrets
 from .lite import AgeGraphStore, PgVectorStore
@@ -32,6 +34,7 @@ from .names import NameError_
 from .neo4j import Neo4jGraphStore
 from .settings import Settings
 from .snapshot import Snapshots
+from .storage import Storage
 from .stores import Conflict, Forbidden, GraphStore, NotFound, SqlStore, StoreError, Unavailable, VectorStore
 
 log = logging.getLogger("swsdb")
@@ -114,6 +117,8 @@ async def _on_cluster_event(app: FastAPI, event: dict) -> None:
     kind = event.get("kind")
     if kind in ("keys", "reset"):
         app.state.keys.forget()
+    if kind in ("auth", "reset") and app.state.endusers is not None:
+        app.state.endusers.forget()
     if kind in ("graphs", "reset") and app.state.graph is not None:
         app.state.graph.forget()
     if kind == "reset" and app.state.sql is not None:
@@ -162,6 +167,11 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
                                        else GraphStore(password=secret["falkordb_password"]))
                 made.append(app.state.graph)
         app.state.keys = KeyStore(app.state.sql)
+        if isinstance(app.state.sql, SqlStore):  # (tests pass stand-ins)
+            app.state.endusers = EndUsers(app.state.sql)
+            app.state.dataapi = DataApi(app.state.sql)
+            app.state.storage = Storage(app.state.sql, s.max_upload_mb * 1024 * 1024)
+            app.state.sql.add_setup(STATS_SETUP)
         app.state.cluster = Cluster(app.state.sql, files=s.files, profile=s.profile, name=s.server_id,
                                     fence_size=s.ingest_workers + 6)
         app.state.keys.changed = lambda: app.state.cluster.notify("keys")
@@ -204,6 +214,7 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     app.state.sql = app.state.vector = app.state.graph = app.state.docs = None
     app.state.docs_error = None
     app.state.keys = KeyStore((stores or {}).get("sql"))
+    app.state.endusers = app.state.dataapi = app.state.storage = None
     app.state.cluster = Cluster(None, files=s.files, profile=s.profile)  # replaced on start when Postgres is there
     app.state.maintenance = None  # "snapshot" or "restore" while one runs
     app.state.answerer = None
@@ -253,8 +264,19 @@ def create_app(settings: Settings | None = None, monitor: Monitor | None = None,
     async def caller(request: Request) -> Caller:
         """Who is calling. Keys from the environment reach every tenant; managed keys reach one. With no keys at all
         (none in the environment and no managed ones), every caller is a global admin, for local use."""
+        c = await _resolve(request)
+        request.state.caller = c  # for the request log
+        return c
+
+    async def _resolve(request: Request) -> Caller:
         admin, read = s.api_key, s.read_only_api_key
         given = _key_from(request)
+        users = request.app.state.endusers
+        if given and users is not None and given.startswith("eyJ") and given.count(".") == 2:
+            found = await users.resolve(given)  # an end user's access token: never more than that user
+            if found is None:
+                raise HTTPException(401, "the access token is invalid or expired: sign in again")
+            return Caller("user", found[0], None, found[1])
         if given and admin and hmac.compare_digest(given, admin.get_secret_value()):
             return Caller("admin", None)
         if given and read and hmac.compare_digest(given, read.get_secret_value()):

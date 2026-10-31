@@ -84,6 +84,52 @@ class Activity:
 ACTIVITY = Activity()
 
 
+class RequestLog:
+    """The last few thousand API requests on this server, for the console's Logs page: when, which route (the template,
+    not the raw path), status, time, tenant and key. No bodies, query strings or key values."""
+
+    def __init__(self, size: int = 5000):
+        from collections import deque
+        self.entries: deque = deque(maxlen=size)
+
+    def add(self, method: str, route: str, status: int, ms: float, tenant: str | None, role: str | None,
+            key_id: str | None) -> None:
+        self.entries.append({"at": time.time(), "method": method, "route": route, "status": status, "ms": round(ms, 1),
+                             "tenant": tenant, "role": role, "key": key_id})
+
+    def query(self, tenant: str | None, *, limit: int = 200, status: str | None = None, route: str | None = None,
+              min_ms: float = 0) -> dict:
+        """Newest first. `tenant` None: every tenant. `status`: "2xx", "4xx", "5xx" or an exact code."""
+        def keep(e: dict) -> bool:
+            if tenant is not None and e["tenant"] != tenant:
+                return False
+            code = str(e["status"])
+            if status and not (code == status or (status.endswith("xx") and code[0] == status[0])):
+                return False
+            if route and route.lower() not in e["route"].lower():
+                return False
+            return e["ms"] >= min_ms
+
+        rows = [e for e in self.entries if keep(e)]
+        by_route: dict[tuple[str, str], list] = {}
+        for e in rows:
+            by_route.setdefault((e["method"], e["route"]), []).append(e)
+        routes = []
+        for (method, rt), es in by_route.items():
+            ms = sorted(x["ms"] for x in es)
+            routes.append({"method": method, "route": rt, "calls": len(es),
+                           "errors": sum(x["status"] >= 500 for x in es),
+                           "client_errors": sum(400 <= x["status"] < 500 for x in es),
+                           "mean_ms": round(sum(ms) / len(ms), 1), "p95_ms": ms[min(len(ms) - 1, int(0.95 * len(ms)))],
+                           "max_ms": ms[-1], "total_ms": round(sum(ms), 1)})
+        routes.sort(key=lambda r: -r["total_ms"])
+        return {"entries": list(reversed(rows))[:limit], "matched": len(rows), "routes": routes[:50],
+                "kept": len(self.entries)}
+
+
+REQUESTS = RequestLog()
+
+
 class HttpMetrics(BaseHTTPMiddleware):
     """Requests by route template (not raw path, so ids don't explode the series count), and a trace span each."""
 
@@ -97,9 +143,15 @@ class HttpMetrics(BaseHTTPMiddleware):
                 return response
             finally:
                 route = getattr(request.scope.get("route"), "path", None) or "unmatched"
+                took = time.perf_counter() - t0
                 if route != "/metrics":
                     HTTP_REQUESTS.labels(request.method, route, str(status)).inc()
-                    HTTP_SECONDS.labels(request.method, route).observe(time.perf_counter() - t0)
+                    HTTP_SECONDS.labels(request.method, route).observe(took)
+                if route.startswith(("/v1/", "/mcp")) and route != "/v1/logs":
+                    c = getattr(request.state, "caller", None)
+                    REQUESTS.add(request.method, route, status, took * 1000,
+                                 getattr(request.state, "tenant", None) or (c.tenant if c else None),
+                                 c.role if c else None, c.key_id if c else None)
 
 
 async def refresh(app) -> None:

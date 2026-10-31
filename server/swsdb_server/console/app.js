@@ -246,19 +246,19 @@ function barList(items, { onPick, active } = {}) {
 }
 
 // vertical bars over time (minutes, days): hover shows the value; sparse axis labels; a baseline
-function columnChart(points, { label = (p) => p.x, height = 120, unit = "" } = {}) {
-  const W = 600, H = height, pad = { l: 34, r: 6, t: 8, b: 20 };
+function columnChart(points, { label = (p) => p.x, height = 120, unit = "", width = 600 } = {}) {
+  const W = width, H = height, pad = { l: 34, r: 6, t: 8, b: 20 };
   const max = Math.max(1, ...points.map((p) => p.y));
   const pow = 10 ** Math.floor(Math.log10(max));
   const nice = [1, 2, 2.5, 5, 10].map((m) => m * pow).find((v) => v >= max);
   const bw = (W - pad.l - pad.r) / Math.max(points.length, 1);
   const svg = s("svg", { class: "colchart", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img" });
-  for (const f of [0, 0.5, 1]) {
+  for (const f of Number.isInteger(nice / 2) ? [0, 0.5, 1] : [0, 1]) {
     const y = pad.t + (H - pad.t - pad.b) * (1 - f);
     svg.append(s("line", { x1: pad.l, x2: W - pad.r, y1: y, y2: y, class: f ? "grid" : "base" }),
       s("text", { x: pad.l - 6, y: y + 3, "text-anchor": "end", class: "axis" }, num(Math.round(nice * f))));
   }
-  const every = Math.ceil(points.length / 6);
+  const every = Math.ceil(points.length / (W < 400 ? 4 : 6));
   points.forEach((p, i) => {
     const hgt = ((H - pad.t - pad.b) * p.y) / nice;
     const x = pad.l + i * bw;
@@ -279,8 +279,15 @@ const PAGES = {
   collections: { title: "Collections", icon: "database", sub: "Documents, their status in every store, and why anything isn't searchable." },
   search: { title: "Search", icon: "search", sub: "Ask questions as any user and see how each passage was found." },
   graph: { title: "Graph explorer", icon: "graph", sub: "Entities extracted from your documents, how they relate and where they're mentioned." },
-  data: { title: "Data", icon: "file", sub: "Look at the raw data: SQL tables, the graph with Cypher, and every vector point. Through the API, with your key's permissions." },
+  reports: { title: "Reports", icon: "eval", sub: "Saved queries pinned as live charts: your own dashboard, run fresh each time." },
+  data: { title: "Data", icon: "file", sub: "Look at the raw data: tables row by row, SQL, the graph with Cypher, and every vector point. Through the API, with your key's permissions." },
   eval: { title: "Evaluation", icon: "eval", sub: "Measure retrieval on your own questions and compare configurations with numbers." },
+  advisors: { title: "Advisors", icon: "shield", sub: "Security and performance checks of this server and tenant, each with what to do about it." },
+  logs: { title: "Logs", icon: "clock", sub: "Recent API requests on this server and where the time goes, route by route." },
+  users: { title: "Users", icon: "key", sub: "Your app's end users: who may sign in, their groups, and how long a sign-in lasts." },
+  policies: { title: "Policies", icon: "shield", sub: "Row-level security: which tables and functions signed-in users reach, and which rows." },
+  storage: { title: "Storage", icon: "archive", sub: "Files in buckets, kept in Postgres with everything else; each user owns a folder." },
+  keys: { title: "API keys", icon: "key", sub: "Keys for one tenant each: make them, see when they were last used, revoke them." },
   backups: { title: "Backups", icon: "archive", sub: "Snapshots of every engine at one consistent point, scheduled backups and their copies in S3." },
   doctor: { title: "Doctor", icon: "doctor", sub: "Check that the vector store and the graph agree with Postgres, the source of truth, and repair drift." },
 };
@@ -303,7 +310,7 @@ view.overview = async (root, _arg, actions) => {
   const nodes = all.reduce((a, c) => a + (c.info && c.info.graph ? c.info.graph.nodes || 0 : 0), 0);
   const docsTotal = cols.reduce((a, c) => a + c.info.documents.count, 0);
   const sync = st.sync || {};
-  const stat = (ico, color, label, value, foot) => card(h("div", { class: "row between" },
+  const stat = (ico, color, label, value, foot) => card(h("div", { class: "stat-row" },
     h("div", { class: "stat" }, h("div", { class: "label" }, label), h("div", { class: "value" }, value),
       h("div", { class: "foot" }, foot)), h("div", { class: `icon-tile ${color}` }, icon(ico))));
 
@@ -332,16 +339,17 @@ view.overview = async (root, _arg, actions) => {
           ? [rel(sync.last_reconcile.at), " · ", plural(sync.last_reconcile.issues, "issue")] : "not yet (every 10 min)"))));
 
   const minuteLabel = (p) => new Date(p.x * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const activity = act ? card(cardHead("Activity", "This server, the last hour (resets when it restarts)"),
+  const activity = act ? card(cardHead("Searches and indexing", "This server, the last hour (it starts again when the server restarts)"),
     h("div", { class: "metric-row" },
       h("div", { class: "metric" }, h("b", {}, num(act.searches)), h("span", {}, "searches")),
-      h("div", { class: "metric" }, h("b", {}, act.latency_ms.p50 !== null ? `${act.latency_ms.p50} ms` : "-"),
-        h("span", {}, `median · p95 ${act.latency_ms.p95 !== null ? `${act.latency_ms.p95} ms` : "-"}`)),
+      h("div", { class: "metric" }, h("b", {}, act.latency_ms.p50 !== null ? `${act.latency_ms.p50} ms` : "no searches"),
+        h("span", {}, act.latency_ms.p95 !== null ? `median search · p95 ${act.latency_ms.p95} ms` : "search time shows here")),
       h("div", { class: "metric" }, h("b", {}, num(act.indexed)), h("span", {}, act.failed ? `indexed · ${act.failed} failed` : "documents indexed"))),
-    h("div", { class: "facet" }, h("h3", {}, "Searches per minute"),
-      columnChart(act.minutes.map((m) => ({ x: m.minute, y: m.search })), { label: minuteLabel, unit: " searches" })),
-    h("div", { class: "facet" }, h("h3", {}, "Documents indexed per minute"),
-      columnChart(act.minutes.map((m) => ({ x: m.minute, y: m.indexed })), { label: minuteLabel, unit: " documents" }))) : null;
+    h("div", { class: "grid c2 charts-row" },
+      h("div", {}, h("h3", { class: "chart-title" }, "Searches per minute"),
+        columnChart(act.minutes.map((m) => ({ x: m.minute, y: m.search })), { label: minuteLabel, unit: " searches", width: 340 })),
+      h("div", {}, h("h3", { class: "chart-title" }, "Documents indexed per minute"),
+        columnChart(act.minutes.map((m) => ({ x: m.minute, y: m.indexed })), { label: minuteLabel, unit: " documents", width: 340 })))) : null;
 
   const collCard = (c) => {
     const d = c.info.documents;
@@ -382,14 +390,15 @@ view.overview = async (root, _arg, actions) => {
     h("div", { class: "grid c4" },
       stat("file", "violet", "Documents", num(docsTotal), `${num(totals.ready || 0)} ready · ${num(totals.failed || 0)} failed`),
       stat("vector", "blue", "Vectors", num(vectors), plural(all.filter((c) => c.vector).length, "collection")),
-      stat("graph", "amber", "Graph nodes", num(nodes), "documents, chunks, entities and your own"),
+      stat("graph", "amber", "Graph nodes", num(nodes), plural(all.filter((c) => c.graph).length, "graph")),
       stat("zap", pending ? "amber" : "green", "Sync backlog", num(pending), pending ? "being applied" : "every store in sync")),
     h("div", { class: "section-title" }, "Engines"),
     h("div", { class: "grid c3" }, Object.entries(st.engines).map(engineCard)),
     h("div", { class: "split" },
-      h("div", { class: "stack" }, h("div", { class: "section-title" }, "Collections"),
-        all.length ? h("div", { class: "grid c2" }, cols.map(collCard), raws.map(rawCard)) : noCollections()),
-      h("div", { class: "stack" }, h("div", { class: "section-title" }, "Sync and activity"), consistency, activity)));
+      h("div", { class: "stack" }, h("div", { class: "section-title" }, "Activity"), activity || card(h("div", { class: "card-pad muted small" }, "Activity needs a key from the environment or the tenant's admin key."))),
+      h("div", { class: "stack" }, h("div", { class: "section-title" }, "Sync"), consistency)),
+    h("div", { class: "section-title" }, "Collections"),
+    all.length ? h("div", { class: "grid c3" }, cols.map(collCard), raws.map(rawCard)) : noCollections());
   state.timers.push(setTimeout(() => { if (currentPage() === "overview") route(true); }, 5000));
 };
 
@@ -573,6 +582,7 @@ async function openDiagnosis(name, id, reload) {
                                                     : p.running ? pill("running", "info") : pill("waiting")) },
       ], r.pending))] : null,
     h("div", { class: "row end" },
+      btn("Original file", () => downloadOriginal(name, id), { ico: "download", title: "Download the file as it was uploaded" }),
       btn("Re-check", () => openDiagnosis(name, id, reload), { ico: "refresh" }),
       btn("Delete", async () => {
         if (!confirm(`Delete ${d.id} from every store? Queries stop returning it at once.`)) return;
@@ -1217,15 +1227,19 @@ function forceGraph({ nodes, edges }, onPick) {
 }
 
 function dataTabs(current, onPick) {
-  return h("div", { class: "tabs", role: "tablist" }, [["sql", "SQL"], ["cypher", "Cypher"], ["vectors", "Vectors"]].map(([k, label]) =>
+  return h("div", { class: "tabs", role: "tablist" }, [["tables", "Tables"], ["schema", "Schema"], ["database", "Database"], ["sql", "SQL"], ["cypher", "Cypher"], ["vectors", "Vectors"]].map(([k, label]) =>
     h("button", { class: k === current ? "on" : null, role: "tab", "aria-selected": k === current ? "true" : "false",
                   onclick: () => onPick(k) }, label)));
 }
 
 view.data = async (root, arg, actions) => {
-  const tab = ["sql", "cypher", "vectors"].includes(arg) ? arg : "sql";
+  const [first, ...rest] = (arg || "").split("/");
+  const tab = ["tables", "schema", "database", "sql", "cypher", "vectors"].includes(first) ? first : "tables";
   fill(actions, dataTabs(tab, (k) => { location.hash = `data/${k}`; }));
   fill(root, skeleton("block", 2));
+  if (tab === "tables") return dataTables(root, rest.length ? rest.join("/") : null);
+  if (tab === "schema") return dataSchema(root);
+  if (tab === "database") return dataDatabase(root, rest[0]);
   if (tab === "sql") return dataSql(root);
   if (tab === "cypher") return dataCypher(root);
   return dataVectors(root);
@@ -1235,18 +1249,23 @@ view.data = async (root, arg, actions) => {
 function resultChart(res) {
   if (res.rows.length < 2 || res.rows.length > 100 || res.columns.length < 2) return null;
   const isNum = (v) => v !== null && v !== "" && !Number.isNaN(Number(v)) && typeof v !== "boolean";
-  const yi = res.columns.findIndex((_, i) => i > 0 && res.rows.every((r) => isNum(r[i])));
-  if (yi < 0) return null;
+  const numeric = res.columns.map((_, i) => i).filter((i) => i > 0 && res.rows.every((r) => isNum(r[i])));
+  if (!numeric.length) return null;
   const xi = 0;
   const isDate = res.rows.every((r) => typeof r[xi] === "string" && /^\d{4}-\d{2}-\d{2}/.test(r[xi]));
-  const points = res.rows.map((r) => ({ x: String(r[xi]), y: Number(r[yi]) }));
-  if (isDate) {
-    points.sort((a, b) => a.x.localeCompare(b.x));
-    return card(cardHead(`${res.columns[yi]} by ${res.columns[xi]}`, "From the result above; hover a bar for its value"),
-      h("div", { class: "card-pad" }, columnChart(points, { label: (p) => p.x.slice(0, 10) })));
-  }
-  return card(cardHead(`${res.columns[yi]} by ${res.columns[xi]}`, "From the result above"),
-    h("div", { class: "card-pad" }, barList(points.slice(0, 30).map((p) => ({ label: p.x, count: p.y })))));
+  const box = h("div", { class: "card" });
+  // the column ORDER BY sorted on is usually the one to show: default to the last number column, let people switch
+  const draw = (yi) => {
+    const points = res.rows.map((r) => ({ x: String(r[xi]), y: Number(r[yi]) }));
+    const pick = numeric.length > 1 ? h("select", { "aria-label": "Column to chart", onchange: (e) => draw(Number(e.target.value)) },
+      numeric.map((i) => h("option", { value: i, selected: i === yi }, res.columns[i]))) : null;
+    if (isDate) points.sort((a, b) => a.x.localeCompare(b.x));
+    fill(box, cardHead(`${res.columns[yi]} by ${res.columns[xi]}`, isDate ? "From the result above; hover a bar for its value" : "From the result above", pick),
+      h("div", { class: "card-pad" }, isDate ? columnChart(points, { label: (p) => p.x.slice(0, 10) })
+        : barList(points.slice(0, 30).map((p) => ({ label: p.x, count: p.y })))));
+  };
+  draw(numeric[numeric.length - 1]);
+  return box;
 }
 
 function csv(res) {
@@ -1261,42 +1280,6 @@ function download(name, text) {
   const a = h("a", { href: URL.createObjectURL(new Blob([text], { type: "text/csv" })), download: name });
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
-async function dataSql(root) {
-  const q = h("textarea", { class: "mono", "aria-label": "SQL", spellcheck: "false" });
-  q.value = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 1";
-  const ro = h("input", { type: "checkbox", checked: true, "aria-label": "Read only" });
-  const out = h("div", { class: "stack" });
-  const tables = h("div", { class: "stack" });
-  async function run() {
-    const r = await guard(() => api("POST", "/v1/sql", { query: q.value, read_only: ro.checked, max_rows: 500 }));
-    if (!r) return;
-    fill(out, resultChart(r), card(cardHead("Result", `${plural(r.row_count, "row")}${r.truncated ? " (first 500)" : ""}`,
-      r.columns.length ? btn("CSV", () => download("result.csv", csv(r)), { ico: "download", title: "Download these rows as CSV" }) : null),
-      resultTable(r)));
-  }
-  q.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(); });
-  const list = await guard(() => api("POST", "/v1/sql", { read_only: true, query:
-    "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 1" }));
-  fill(tables, card(cardHead("Tables", "In this tenant's schema. Click one to look inside."),
-    list && list.rows.length
-      ? table([{ label: "Table", mono: true, get: (r) => r[0] }], list.rows, { onRow: (r) => {
-          q.value = `SELECT * FROM "${String(r[0]).replaceAll('"', '""')}" LIMIT 100`; run(); } })
-      : h("div", { class: "card-pad muted small" }, "No tables yet. Create one with CREATE TABLE.")));
-  const examples = [
-    ["Rows per table", "SELECT table_name, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I', table_name), " +
-      "false, true, '')))[1]::text::bigint AS rows FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 2 DESC"],
-    ["Columns", "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() " +
-      "ORDER BY table_name, ordinal_position"]];
-  fill(root, h("div", { class: "stack" },
-    card(cardHead("SQL", "Runs as this tenant's own Postgres role: its tables only, never swsdb's catalog or another tenant's. " +
-        "A result with a label (or date) and a number gets a chart.",
-        h("label", { class: "row small muted" }, ro, "read only"), btn("Run", run, { kind: "primary", ico: "play", title: "Run (Ctrl+Enter)" })),
-      h("div", { class: "card-pad stack" }, q, h("div", { class: "chips" }, examples.map(([label, text]) =>
-        h("button", { class: "chip", type: "button", onclick: () => { q.value = text; run(); } }, label))))),
-    h("div", { class: "split" }, out, tables)));
-  run();
 }
 
 async function dataCypher(root) {
@@ -1474,6 +1457,1190 @@ async function dataVectors(root) {
   await load(true);
 }
 
+// ------------------------------------------------------------------ table editor: browse the tenant's SQL tables like a spreadsheet
+
+// an identifier inside a statement sent with parameters: "quoted", and % doubled for the placeholder syntax
+const ident = (name) => `"${String(name).replaceAll('"', '""').replaceAll("%", "%%")}"`;
+const sql = (query, params, maxRows = 1000) => api("POST", "/v1/sql", { query, params: params || null, read_only: true, max_rows: maxRows });
+const bytesText = (n) => {
+  if (n === null || n === undefined) return "-";
+  const u = ["B", "kB", "MB", "GB", "TB"];
+  let i = 0, v = Number(n);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v < 10 && i ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
+};
+
+const TABLES_SQL = `SELECT c.relname AS name,
+  CASE c.relkind WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'p' THEN 'partitioned table' ELSE 'table' END AS kind,
+  (SELECT count(*) FROM information_schema.columns col WHERE col.table_schema = n.nspname AND col.table_name = c.relname) AS columns,
+  CASE WHEN c.relkind IN ('r', 'p', 'm') AND c.reltuples >= 0 THEN c.reltuples::bigint
+       WHEN c.relkind IN ('r', 'p', 'm') THEN (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I.%I',
+         n.nspname, c.relname), false, true, '')))[1]::text::bigint END AS rows,
+  CASE WHEN c.relkind IN ('r', 'p', 'm') THEN pg_total_relation_size(c.oid) END AS bytes
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm')
+ORDER BY c.relname`;
+
+const COLUMNS_SQL = `SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, c.column_default,
+  EXISTS (SELECT 1 FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage k
+          ON k.constraint_name = tc.constraint_name AND k.table_schema = tc.table_schema AND k.table_name = tc.table_name
+          WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = c.table_schema AND tc.table_name = c.table_name
+            AND k.column_name = c.column_name) AS pk
+FROM information_schema.columns c WHERE c.table_schema = current_schema() AND c.table_name = %s ORDER BY c.ordinal_position`;
+
+// what each filter operator means in SQL; the value always travels as a parameter
+const OPERATORS = [
+  ["eq", "equals", (c) => `${c} = %s`], ["neq", "not equal", (c) => `${c} <> %s`],
+  ["gt", "greater than", (c) => `${c} > %s`], ["gte", "at least", (c) => `${c} >= %s`],
+  ["lt", "less than", (c) => `${c} < %s`], ["lte", "at most", (c) => `${c} <= %s`],
+  ["like", "contains", (c) => `${c}::text ILIKE %s`], ["null", "is empty", (c) => `${c} IS NULL`],
+  ["notnull", "is not empty", (c) => `${c} IS NOT NULL`]];
+
+function cellView(v, type) {
+  if (v === null || v === undefined) return h("span", { class: "null" }, "NULL");
+  if (typeof v === "boolean") return h("span", { class: v ? "bool-t" : "bool-f" }, String(v));
+  const text = typeof v === "object" ? JSON.stringify(v) : String(v);
+  const num = typeof v === "number" || /^(int|float|numeric|money)/.test(type || "");
+  return h("span", { class: num ? "num" : null, title: text.length > 60 ? text : null }, text.length > 120 ? `${text.slice(0, 119)}…` : text);
+}
+
+function rowDrawer(table, cols, row) {
+  closeDrawer();
+  const scrim = h("div", { class: "scrim", onclick: closeDrawer });
+  const drawer = h("aside", { class: "drawer", role: "dialog", "aria-label": `A row of ${table}` },
+    h("div", { class: "row between" }, h("div", {}, h("div", { class: "tiny muted" }, "Row of"), h("h2", { class: "mono" }, table)),
+      btn("", closeDrawer, { ico: "x", title: "Close" })),
+    h("div", { class: "stack" }, cols.map((c, i) => h("div", { class: "field" },
+      h("div", { class: "row between" }, h("span", { class: "field-label" }, c.column_name, c.pk ? h("span", { class: "pk" }, " key") : null),
+        h("span", { class: "tiny muted mono" }, c.udt_name)),
+      row[i] !== null && typeof row[i] === "object"
+        ? h("pre", { class: "codeblock wrap" }, JSON.stringify(row[i], null, 2))
+        : h("div", { class: "cell-full" }, cellView(row[i], c.udt_name))))));
+  document.body.append(scrim, drawer);
+}
+
+async function dataTables(root, selected) {
+  const list = await guard(() => sql(TABLES_SQL));
+  if (!list) return;
+  const tables = list.rows.map(([name, kind, columns, rows, bytes]) => ({ name, kind, columns, rows, bytes }));
+  const side = h("div", { class: "card flush tables-side" });
+  const main = h("div", { class: "stack" });
+  const find = h("input", { placeholder: "Search tables", "aria-label": "Search tables" });
+  const drawSide = () => {
+    const q = find.value.trim().toLowerCase();
+    const shown = tables.filter((t) => !q || t.name.toLowerCase().includes(q));
+    fill(side, h("div", { class: "card-pad stack tight" }, h("div", { class: "row between" }, h("b", {}, "Tables"),
+        h("span", { class: "tiny muted" }, plural(tables.length, "table"))), find),
+      h("div", { class: "table-links" },
+        h("a", { href: "#data/tables", class: !selected ? "on" : null }, icon("overview"), "All tables"),
+        shown.map((t) => h("a", { href: `#data/tables/${encodeURIComponent(t.name)}`, class: t.name === selected ? "on" : null,
+          title: `${t.kind} · ${t.rows === null ? "rows unknown" : `about ${num(t.rows)} rows`}` },
+          icon(t.kind === "table" ? "database" : "file"), h("span", { class: "ellipsis" }, t.name),
+          h("span", { class: "tiny muted" }, t.rows === null ? "" : num(t.rows))))));
+  };
+  find.addEventListener("input", drawSide);
+  drawSide();
+  fill(root, h("div", { class: "tables-layout" }, side, main));
+  if (!selected || !tables.some((t) => t.name === selected)) {
+    const admin = (await role()) === "admin";
+    fill(main, card(cardHead("Database tables", "Every table and view in this tenant's schema. Counts and sizes are Postgres's estimates.",
+        admin ? btn("New table", () => tableDesigner(tables, (n) => { location.hash = `data/tables/${encodeURIComponent(n)}`; }), { kind: "primary", ico: "plus" }) : null),
+      table([{ label: "Name", mono: true, get: (t) => t.name },
+             { label: "Kind", get: (t) => h("span", { class: "small muted" }, t.kind) },
+             { label: "Columns", num: true, get: (t) => num(t.columns) },
+             { label: "Rows (estimated)", num: true, get: (t) => num(t.rows) },
+             { label: "Size (estimated)", num: true, get: (t) => bytesText(t.bytes) }], tables,
+        { onRow: (t) => { location.hash = `data/tables/${encodeURIComponent(t.name)}`; },
+          emptyView: h("div", { class: "card-pad" }, empty("database", "No tables yet", "Create one in the SQL tab, e.g. CREATE TABLE notes (id int PRIMARY KEY, body text).")) }),
+      h("div", { class: "card-pad tiny muted" }, plural(tables.length, "table"))));
+    return;
+  }
+  await tableGrid(main, selected);
+}
+
+async function tableGrid(main, name) {
+  const colRes = await guard(() => sql(COLUMNS_SQL, [name]));
+  if (!colRes) return;
+  const cols = colRes.rows.map(([column_name, data_type, udt_name, is_nullable, column_default, pk]) =>
+    ({ column_name, data_type, udt_name, nullable: is_nullable === "YES", column_default, pk }));
+  const keys = cols.filter((c) => c.pk).map((c) => c.column_name);
+  const admin = (await role()) === "admin";
+  const editable = admin && keys.length > 0;  // a row is found again by its key: without one, edits could hit several rows
+  let page = 0, size = 100, sort = null, filters = [], view = "data", total = null, rows = [], loading = 0, extras = null;
+  const box = h("div", { class: "stack" });
+  const filterBox = h("div", { class: "stack tight" });
+
+  function whereSql() {
+    const parts = [], params = [];
+    for (const f of filters) {
+      const op = OPERATORS.find((o) => o[0] === f.op);
+      parts.push(op[2](ident(f.column)));
+      if (!["null", "notnull"].includes(f.op)) params.push(f.op === "like" ? `%${f.value}%` : f.value);
+    }
+    return { where: parts.length ? ` WHERE ${parts.join(" AND ")}` : "", params };
+  }
+  async function load() {
+    const mine = ++loading;
+    const { where, params } = whereSql();
+    const order = sort ? ` ORDER BY ${ident(sort.column)} ${sort.desc ? "DESC" : "ASC"} NULLS LAST`
+      : keys.length ? ` ORDER BY ${keys.map(ident).join(", ")}` : "";
+    const sel = cols.map((c) => ident(c.column_name)).join(", ") || "*";
+    const [data, count] = await Promise.all([
+      guard(() => sql(`SELECT ${sel} FROM ${ident(name)}${where}${order} LIMIT ${size} OFFSET ${page * size}`, params, size)),
+      guard(() => sql(`SELECT count(*) FROM ${ident(name)}${where}`, params))]);
+    if (mine !== loading || !data) return;
+    rows = data.rows; total = count ? Number(count.rows[0][0]) : null;
+    draw();
+  }
+  function header(c) {
+    const on = sort && sort.column === c.column_name;
+    return h("th", { class: "click", title: `Sort by ${c.column_name}`, onclick: () => {
+      sort = !on ? { column: c.column_name, desc: false } : sort.desc ? null : { column: c.column_name, desc: true };
+      page = 0; load();
+    } }, h("div", { class: "colhead" }, h("span", {}, c.pk ? h("span", { class: "pk", title: "primary key" }, "⚿ ") : null, c.column_name,
+        on ? (sort.desc ? " ↓" : " ↑") : ""), h("span", { class: "coltype" }, c.udt_name)));
+  }
+  function drawFilters() {
+    const column = h("select", { "aria-label": "Column" }, cols.map((c) => h("option", { value: c.column_name }, c.column_name)));
+    const op = h("select", { "aria-label": "Operator" }, OPERATORS.map(([k, label]) => h("option", { value: k }, label)));
+    const value = h("input", { placeholder: "value", "aria-label": "Value" });
+    op.addEventListener("change", () => { value.disabled = ["null", "notnull"].includes(op.value); });
+    const add = () => {
+      if (!["null", "notnull"].includes(op.value) && value.value === "") return;
+      filters.push({ column: column.value, op: op.value, value: value.value });
+      page = 0; drawFilters(); load();
+    };
+    value.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
+    fill(filterBox, h("div", { class: "row" }, column, op, value, btn("Add filter", add, { ico: "plus" })),
+      filters.length ? h("div", { class: "chips" }, filters.map((f, i) => h("button", { class: "chip", type: "button", title: "Remove this filter",
+        onclick: () => { filters.splice(i, 1); page = 0; drawFilters(); load(); } },
+        `${f.column} ${OPERATORS.find((o) => o[0] === f.op)[1]}${["null", "notnull"].includes(f.op) ? "" : ` ${f.value}`}  ×`))) : null);
+  }
+  function draw() {
+    const pages = total === null ? null : Math.max(1, Math.ceil(total / size));
+    const from = rows.length ? page * size + 1 : 0, to = page * size + rows.length;
+    const sizeSel = h("select", { "aria-label": "Rows per page", onchange: (e) => { size = Number(e.target.value); page = 0; load(); } },
+      [50, 100, 500].map((n) => h("option", { value: n, selected: n === size }, `${n} rows`)));
+    const tabs = h("div", { class: "tabs" }, [["data", "Data"], ["definition", "Definition"], ["api", "API"]].map(([k, l]) =>
+      h("button", { type: "button", class: view === k ? "on" : null, onclick: () => {
+        view = k; draw();
+        if (k === "definition" && !extras) definitionExtras(name).then((x) => { extras = x; draw(); });
+      } }, l)));
+    const grid = view === "data"
+      ? (rows.length ? h("div", { class: "grid-wrap" }, h("table", { class: "sheet" },
+          h("thead", {}, h("tr", {}, h("th", { class: "rownum" }, "#"), cols.map(header))),
+          h("tbody", {}, rows.map((r, i) => h("tr", { class: "click", title: editable ? "Edit this row" : "See this row",
+            onclick: () => (editable ? rowEditor(name, cols, r, keys, load) : rowDrawer(name, cols, r)) },
+            h("td", { class: "rownum" }, page * size + i + 1), r.map((v, j) => h("td", {}, cellView(v, cols[j] && cols[j].udt_name))))))))
+        : h("div", { class: "card-pad" }, empty("database", filters.length ? "No rows match the filters" : "This table is empty", "")))
+      : table([{ label: "Column", mono: true, get: (c) => [c.pk ? h("span", { class: "pk" }, "⚿ ") : null, c.column_name] },
+               { label: "Type", mono: true, get: (c) => c.data_type === "USER-DEFINED" ? c.udt_name : c.data_type },
+               { label: "Nullable", get: (c) => (c.nullable ? "yes" : h("b", {}, "no")) },
+               { label: "Default", mono: true, get: (c) => c.column_default || h("span", { class: "muted" }, "-") }], cols);
+    fill(box, card(
+      h("div", { class: "card-head" }, h("div", {}, h("h2", { class: "mono" }, name),
+          h("div", { class: "sub" }, total === null ? "" : `${num(from)}–${num(to)} of ${num(total)} rows${filters.length ? " matching the filters" : ""} · ${plural(cols.length, "column")}`)),
+        h("div", { class: "row" }, tabs, editable && view === "data" ? btn("Insert row", () => rowEditor(name, cols, null, keys, load), { kind: "primary", ico: "plus" }) : null,
+          btn("", load, { ico: "refresh", title: "Refresh" }),
+          btn("CSV", () => download(`${name}.csv`, csv({ columns: cols.map((c) => c.column_name), rows })), { ico: "download", title: "Download this page as CSV" }))),
+      view === "data" ? h("div", { class: "card-pad" }, filterBox) : null,
+      view === "data" && admin && !keys.length ? h("div", { class: "card-pad tiny muted" }, "Read-only: this table has no primary key, so a row can't be singled out for editing (the Advisors page explains how to add one).") : null,
+      view === "api" ? null : grid,
+      view === "data" && total !== null ? h("div", { class: "row between card-pad" },
+        h("div", { class: "row" }, btn("Previous", () => { if (page > 0) { page--; load(); } }),
+          h("span", { class: "small muted" }, `page ${page + 1} of ${num(pages)}`),
+          btn("Next", () => { if (page + 1 < pages) { page++; load(); } })), sizeSel) : null),
+      view === "definition" ? extras : null,
+      view === "definition" && admin ? columnTools(name, () => tableGrid(main, name)) : null,
+      view === "api" ? tableApi(name, cols) : null);
+  }
+  fill(main, box);
+  drawFilters();
+  await load();
+}
+
+// ------------------------------------------------------------------ connect: how an app, an SDK or an agent reaches this server
+
+function copyButton(text) {
+  return btn("Copy", async () => {
+    try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { toast("Copy isn't allowed here: select the text instead", "info"); }
+  }, { ico: "file", title: "Copy to the clipboard" });
+}
+
+function openConnect() {
+  closeDrawer();
+  const url = location.origin;
+  const t = state.tenant;
+  const tenantArg = t === "default" ? "" : `, tenant="${t}"`;
+  const tenantTs = t === "default" ? "" : `, tenant: "${t}"`;
+  const tenantHdr = t === "default" ? "" : ` -H "swsdb-tenant: ${t}"`;
+  const snippets = [
+    ["Python", `pip install swsdb
+
+import os
+from swsdb import SwsDB
+
+db = SwsDB("${url}", api_key=os.environ["SWSDB_API_KEY"]${tenantArg})
+kb = db.collection("handbook")
+print(kb.answer("What is the refund policy?")["answer"])`],
+    ["TypeScript", `npm install swsdb
+
+import { SwsDB } from "swsdb";
+
+const db = new SwsDB({ url: "${url}", apiKey: process.env.SWSDB_API_KEY${tenantTs} });
+const hits = await db.collection("handbook").query("refund policy", { k: 5 });`],
+    ["curl", `curl ${url}/v1/collections/handbook/query \\
+  -H "api-key: $SWSDB_API_KEY"${tenantHdr} \\
+  -H "content-type: application/json" \\
+  -d '{"query": "refund policy", "k": 5}'`],
+    ["MCP (agents)", `{
+  "mcpServers": {
+    "swsdb": {
+      "type": "http",
+      "url": "${url}/mcp",
+      "headers": { "api-key": "<your key>"${t === "default" ? "" : `, "swsdb-tenant": "${t}"`} }
+    }
+  }
+}
+
+Read-only tools at /mcp; tools that add documents and memories at /mcp/rw.`],
+    ["LangChain", `pip install "swsdb[langchain]"
+
+import os
+from swsdb.langchain import SwsDBRetriever
+
+retriever = SwsDBRetriever(collection="handbook", url="${url}", api_key=os.environ["SWSDB_API_KEY"]${tenantArg}, k=5)
+docs = retriever.invoke("What is the refund policy?")`]];
+  let current = 0;
+  const body = h("div", { class: "stack" });
+  const tabs = h("div", { class: "tabs" });
+  const draw = () => {
+    fill(tabs, snippets.map(([label], i) => h("button", { type: "button", class: i === current ? "on" : null,
+      onclick: () => { current = i; draw(); } }, label)));
+    const [, code] = snippets[current];
+    fill(body, h("div", { class: "row end" }, copyButton(code)), h("pre", { class: "codeblock wrap" }, code));
+  };
+  draw();
+  const scrim = h("div", { class: "scrim", onclick: closeDrawer });
+  const drawer = h("aside", { class: "drawer", role: "dialog", "aria-label": "Connect" },
+    h("div", { class: "row between" }, h("h2", {}, "Connect to swsdb"), btn("", closeDrawer, { ico: "x", title: "Close" })),
+    h("dl", { class: "kv" }, h("dt", {}, "Server"), h("dd", { class: "mono" }, url, " ", copyButton(url)),
+      h("dt", {}, "Tenant"), h("dd", { class: "mono" }, t), h("dt", {}, "Key"),
+      h("dd", {}, "Send it as the ", h("span", { class: "kbd" }, "api-key"), " header. Make one on the ",
+        h("a", { href: "#keys", onclick: closeDrawer }, "API keys"), " page; this page never shows a stored key.")),
+    tabs, body,
+    h("div", { class: "small muted" }, "The full API is at ", h("a", { href: "/docs", target: "_blank", rel: "noopener" }, "/docs"),
+      " (OpenAPI)."));
+  document.body.append(scrim, drawer);
+}
+
+// ------------------------------------------------------------------ API keys
+
+view.keys = async (root, _arg, actions) => {
+  fill(root, skeleton("block", 2));
+  const st = await api("GET", "/v1/status");
+  const global = st.tenant === null || st.tenant === undefined;
+  let all = false, armed = null, created = null;
+  const out = h("div", { class: "stack" });
+  const name = h("input", { placeholder: "Name, e.g. support-bot", "aria-label": "Key name" });
+  const role = h("select", { "aria-label": "Role" }, [["read", "read: search and read"], ["admin", "admin: read and write"]]
+    .map(([v, l]) => h("option", { value: v }, l)));
+  const tenant = h("input", { value: state.tenant, "aria-label": "Tenant", disabled: !global, title: global ? "" : "A tenant's key makes keys for its own tenant" });
+  async function create() {
+    const r = await guard(() => api("POST", "/v1/keys", { name: name.value.trim() || null, role: role.value, tenant: tenant.value.trim() || null }));
+    if (!r) return;
+    created = r; name.value = ""; load();
+  }
+  async function load() {
+    const r = await guard(() => api("GET", `/v1/keys?all_tenants=${all ? "true" : "false"}`));
+    if (!r) return;
+    const keys = r.keys;
+    const active = keys.filter((k) => !k.revoked_at);
+    fill(out,
+      created ? card(h("div", { class: "card-pad stack" }, h("div", { class: "row between" }, h("b", {}, `Key ${created.id} (${created.role}, ${created.tenant})`),
+          btn("", () => { created = null; load(); }, { ico: "x", title: "Dismiss" })),
+        h("div", { class: "small" }, "Copy it now: swsdb keeps only a hash, so it can't show this key again."),
+        h("div", { class: "row" }, h("code", { class: "codeblock wrap grow" }, created.key), copyButton(created.key)))) : null,
+      card(cardHead("Keys", `${num(active.length)} active · ${num(keys.length - active.length)} revoked`,
+          global ? h("label", { class: "row small muted" }, h("input", { type: "checkbox", checked: all,
+            onchange: (e) => { all = e.target.checked; load(); } }), "every tenant") : null),
+        table([
+          { label: "Id", mono: true, get: (k) => k.id },
+          { label: "Name", get: (k) => k.name || h("span", { class: "muted" }, "-") },
+          { label: "Tenant", mono: true, get: (k) => k.tenant },
+          { label: "Role", get: (k) => pill(k.role, k.role === "admin" ? "warn" : "info", false) },
+          { label: "Created", get: (k) => h("span", { class: "muted", title: new Date(k.created_at).toLocaleString() }, rel(k.created_at)) },
+          { label: "Last used", get: (k) => (k.last_used_at ? h("span", { title: new Date(k.last_used_at).toLocaleString() }, rel(k.last_used_at)) : h("span", { class: "muted" }, "never")) },
+          { label: "", num: true, get: (k) => (k.revoked_at ? pill("revoked", "bad", false)
+            : armed === k.id
+              ? h("div", { class: "row end" }, btn("Cancel", (e) => { e.stopPropagation(); armed = null; load(); }),
+                  btn("Revoke now", async (e) => { e.stopPropagation(); if (await guard(() => api("DELETE", `/v1/keys/${encodeURIComponent(k.id)}`))) { toast(`Revoked ${k.id}`, "info"); armed = null; load(); } }, { kind: "danger", ico: "trash" }))
+              : btn("Revoke", (e) => { e.stopPropagation(); armed = k.id; load(); }, { ico: "trash" })) },
+        ], keys, { emptyView: h("div", { class: "card-pad" }, empty("key", "No managed keys yet", "Make one below. Keys from the environment (SWSDB_API_KEY) aren't listed.")) })));
+  }
+  fill(actions, btn("Refresh", load, { ico: "refresh" }));
+  fill(root, out, card(cardHead("New key", "A key reaches one tenant. Revoking it works at once, on every server."),
+    h("div", { class: "card-pad row" }, name, role, tenant, btn("Create key", create, { kind: "primary", ico: "key" }))));
+  await load();
+};
+
+// ------------------------------------------------------------------ advisors
+
+view.advisors = async (root, arg, actions) => {
+  const cat = arg === "performance" ? "performance" : "security";
+  fill(actions, h("div", { class: "tabs" }, [["security", "Security"], ["performance", "Performance"]].map(([k, l]) =>
+    h("button", { type: "button", class: k === cat ? "on" : null, onclick: () => { location.hash = `advisors/${k}`; } }, l))),
+    btn("Run again", () => route(), { ico: "refresh" }));
+  fill(root, skeleton("block", 3));
+  const r = await api("GET", "/v1/advisors");
+  const mine = r.findings.filter((f) => f.category === cat);
+  const count = (lvl) => mine.filter((f) => f.level === lvl).length;
+  const kind = { error: "bad", warning: "warn", info: "info" };
+  const tile = (lvl, label) => card(h("div", { class: "stat" }, h("div", { class: "label" }, label),
+    h("div", { class: "value" }, num(count(lvl))), h("div", { class: "foot" }, `${cat} · ${{ error: "fix these", warning: "worth fixing", info: "consider" }[lvl]}`)));
+  fill(root,
+    h("div", { class: "grid c3" }, tile("error", "Errors"), tile("warning", "Warnings"), tile("info", "Suggestions")),
+    mine.length ? mine.map((f) => card(h("div", { class: "card-pad stack tight" },
+      h("div", { class: "row between" }, h("div", { class: "row" }, pill(f.level, kind[f.level]), h("b", {}, f.title)),
+        h("span", { class: "tiny muted mono" }, f.check)),
+      h("div", { class: "small" }, f.detail),
+      h("div", { class: "small" }, h("b", {}, "What to do: "), f.fix),
+      f.items.length ? h("details", {}, h("summary", { class: "small muted" }, plural(f.items.length, "item")),
+        h("ul", { class: "small mono" }, f.items.map((x) => h("li", {}, x)))) : null)))
+      : card(empty("shield", `No ${cat} issues found`, `${plural(r.checks.length, "check")} ran (${r.scope}).`)),
+    h("div", { class: "tiny muted" }, `Checked ${r.scope} for tenant ${r.tenant}: ${r.checks.join(", ")}.`));
+};
+
+// ------------------------------------------------------------------ logs and query performance
+
+view.logs = async (root, arg, actions) => {
+  const tabs = h("div", { class: "tabs" }, [["requests", "API requests"], ["database", "Database queries"]].map(([k, l]) =>
+    h("button", { type: "button", class: (arg === "database" ? "database" : "requests") === k ? "on" : null,
+                  onclick: () => { location.hash = k === "database" ? "logs/database" : "logs"; } }, l)));
+  if (arg === "database") { fill(actions, tabs, btn("Refresh", () => route(), { ico: "refresh" })); return dbQueries(root); }
+  let status = "", routeQ = "", minMs = 0, live = false;
+  const out = h("div", { class: "stack" });
+  const statusSel = h("select", { "aria-label": "Status", onchange: (e) => { status = e.target.value; load(); } },
+    [["", "Every status"], ["2xx", "2xx success"], ["4xx", "4xx refused"], ["5xx", "5xx errors"]].map(([v, l]) => h("option", { value: v }, l)));
+  const routeIn = h("input", { placeholder: "Route contains, e.g. query", "aria-label": "Route" });
+  let typing;
+  routeIn.addEventListener("input", () => { clearTimeout(typing); typing = setTimeout(() => { routeQ = routeIn.value.trim(); load(); }, 250); });
+  const slowSel = h("select", { "aria-label": "Slower than", onchange: (e) => { minMs = Number(e.target.value); load(); } },
+    [[0, "Any time"], [100, "≥ 100 ms"], [500, "≥ 500 ms"], [1000, "≥ 1 s"]].map(([v, l]) => h("option", { value: v }, l)));
+  const liveBox = h("input", { type: "checkbox", "aria-label": "Live", onchange: (e) => { live = e.target.checked; if (live) tick(); } });
+  function tick() { if (live && currentPage() === "logs") { load(); state.timers.push(setTimeout(tick, 3000)); } }
+  const statusKind = (c) => (c >= 500 ? "bad" : c >= 400 ? "warn" : "ok");
+  async function load() {
+    const p = new URLSearchParams({ limit: 300 });
+    if (status) p.set("status", status);
+    if (routeQ) p.set("route", routeQ);
+    if (minMs) p.set("min_ms", minMs);
+    const r = await guard(() => api("GET", `/v1/logs?${p}`));
+    if (!r) return;
+    const most = Math.max(1, ...r.routes.map((x) => x.total_ms));
+    fill(out,
+      card(cardHead("Query performance", "Time spent per route among the requests shown, most first: where to look when things are slow"),
+        table([
+          { label: "Route", mono: true, get: (x) => `${x.method} ${x.route}` },
+          { label: "Calls", num: true, get: (x) => num(x.calls) },
+          { label: "Errors", num: true, get: (x) => (x.errors ? pill(num(x.errors), "bad", false) : x.client_errors ? pill(num(x.client_errors), "warn", false) : "0") },
+          { label: "Mean", num: true, get: (x) => `${x.mean_ms} ms` },
+          { label: "p95", num: true, get: (x) => `${x.p95_ms} ms` },
+          { label: "Max", num: true, get: (x) => `${x.max_ms} ms` },
+          { label: "Time consumed", get: (x) => {
+            const b = h("i"); b.style.width = `${Math.max(2, (x.total_ms / most) * 100)}%`;
+            return h("div", { class: "bar-row nolabel", title: `${num(Math.round(x.total_ms))} ms in all` }, h("span", { class: "bar-track" }, b),
+              h("span", { class: "bar-value" }, `${num(Math.round(x.total_ms))} ms`));
+          } }], r.routes, { emptyView: h("div", { class: "card-pad muted small" }, "No requests match.") })),
+      card(cardHead("Requests", `${num(r.entries.length)} newest of ${num(r.matched)} matching · this server keeps the last ${num(r.kept)}`),
+        table([
+          { label: "Time", get: (e) => h("span", { class: "mono small", title: new Date(e.at * 1000).toLocaleString() }, new Date(e.at * 1000).toLocaleTimeString()) },
+          { label: "Status", get: (e) => pill(String(e.status), statusKind(e.status), false) },
+          { label: "Method", mono: true, get: (e) => e.method },
+          { label: "Route", mono: true, get: (e) => e.route },
+          { label: "Time", num: true, get: (e) => `${e.ms} ms` },
+          { label: "Tenant", mono: true, get: (e) => e.tenant || h("span", { class: "muted" }, "-") },
+          { label: "Key", mono: true, get: (e) => e.key || h("span", { class: "muted" }, e.role ? `${e.role} (environment)` : "-") }],
+          r.entries, { emptyView: h("div", { class: "card-pad muted small" }, "No requests match.") })));
+  }
+  fill(actions, tabs, btn("Refresh", load, { ico: "refresh" }));
+  fill(root, card(h("div", { class: "card-pad row" }, statusSel, routeIn, slowSel, h("label", { class: "row small muted" }, liveBox, "live"),
+    h("span", { class: "tiny muted" }, "Routes, statuses and times only: no request bodies, parameters or key values are kept."))), out);
+  await load();
+};
+
+// ------------------------------------------------------------------ schema visualizer
+
+const SCHEMA_SQL = `SELECT c.table_name, c.column_name, c.udt_name, c.is_nullable,
+  EXISTS (SELECT 1 FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage k
+          ON k.constraint_name = tc.constraint_name AND k.table_schema = tc.table_schema AND k.table_name = tc.table_name
+          WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = c.table_schema AND tc.table_name = c.table_name
+            AND k.column_name = c.column_name) AS pk
+FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+WHERE c.table_schema = current_schema() AND t.table_type = 'BASE TABLE' ORDER BY c.table_name, c.ordinal_position`;
+const FKEYS_SQL = `SELECT cl.relname, ref.relname, a.attname, ra.attname, con.conname
+FROM pg_constraint con JOIN pg_class cl ON cl.oid = con.conrelid JOIN pg_class ref ON ref.oid = con.confrelid
+JOIN pg_namespace n ON n.oid = con.connamespace
+CROSS JOIN LATERAL unnest(con.conkey, con.confkey) AS k(col, refcol)
+JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.col
+JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refcol
+WHERE con.contype = 'f' AND n.nspname = current_schema()`;
+
+async function dataSchema(root) {
+  const [colsR, fkR] = await Promise.all([guard(() => sql(SCHEMA_SQL, null, 5000)), guard(() => sql(FKEYS_SQL, null, 2000))]);
+  if (!colsR || !fkR) return;
+  const tables = new Map();
+  for (const [t, c, type, nullable, pk] of colsR.rows) {
+    if (!tables.has(t)) tables.set(t, []);
+    tables.get(t).push({ name: c, type, nullable: nullable === "YES", pk });
+  }
+  const fks = fkR.rows.map(([from, to, col, refcol, conname]) => ({ from, to, col, refcol, conname }));
+  if (!tables.size) { fill(root, card(empty("database", "No tables yet", "Create one in the SQL tab; its columns and foreign keys show here."))); return; }
+  // columns of boxes by dependency depth: a table goes right of the tables it points to
+  const names = [...tables.keys()];
+  const depth = new Map(names.map((n) => [n, 0]));
+  for (let i = 0; i < names.length; i++) for (const f of fks) if (f.from !== f.to && depth.get(f.from) <= depth.get(f.to)) depth.set(f.from, depth.get(f.to) + 1);
+  const BW = 230, RH = 20, HH = 30, GX = 90, GY = 28;
+  const cols = new Map();
+  for (const n of names.sort()) { const d = Math.min(depth.get(n), 6); if (!cols.has(d)) cols.set(d, []); cols.get(d).push(n); }
+  const pos = new Map();
+  let W = 0, H = 0;
+  for (const [d, list] of [...cols.entries()].sort((a, b) => a[0] - b[0])) {
+    let y = 20;
+    for (const n of list) {
+      const hgt = HH + tables.get(n).length * RH + 8;
+      pos.set(n, { x: 20 + d * (BW + GX), y, h: hgt });
+      y += hgt + GY;
+    }
+    W = Math.max(W, 20 + d * (BW + GX) + BW + 20); H = Math.max(H, y);
+  }
+  const svg = s("svg", { class: "schemaview", viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+  const rowY = (t, col) => { const p = pos.get(t); const i = tables.get(t).findIndex((c) => c.name === col); return p.y + HH + i * RH + RH / 2 + 4; };
+  for (const f of fks) {
+    const a = pos.get(f.from), b = pos.get(f.to);
+    if (!a || !b) continue;
+    const y1 = rowY(f.from, f.col), y2 = rowY(f.to, f.refcol);
+    const x1 = a.x, x2 = b.x + BW;
+    const back = x1 > x2;
+    const d = back ? `M${x1},${y1} C${x1 - 50},${y1} ${x2 + 50},${y2} ${x2},${y2}` : `M${a.x + BW},${y1} C${a.x + BW + 40},${y1} ${b.x - 40},${y2} ${b.x},${y2}`;
+    svg.append(s("path", { d, class: "fk" }, s("title", {}, `${f.from}.${f.col} → ${f.to}.${f.refcol} (${f.conname})`)));
+  }
+  for (const [n, list] of tables) {
+    const p = pos.get(n);
+    const g = s("g", { class: "tbox", transform: `translate(${p.x},${p.y})` });
+    g.append(s("rect", { width: BW, height: p.h, rx: 8, class: "frame" }), s("rect", { width: BW, height: HH, rx: 8, class: "head" }),
+      s("text", { x: 12, y: 20, class: "tname" }, n));
+    list.forEach((c, i) => {
+      const y = HH + i * RH + 14;
+      g.append(s("text", { x: 12, y, class: c.pk ? "cname pkcol" : "cname" }, `${c.pk ? "⚿ " : ""}${c.name}`),
+        s("text", { x: BW - 10, y, "text-anchor": "end", class: "ctype" }, `${c.type}${c.nullable ? "" : " !"}`));
+    });
+    g.addEventListener("click", () => { location.hash = `data/tables/${encodeURIComponent(n)}`; });
+    svg.append(g);
+  }
+  fill(root, card(cardHead("Schema", `${plural(tables.size, "table")} · ${plural(fks.length, "foreign key")}. Lines link a foreign key to the column it references; ! marks NOT NULL. Click a table to open it.`),
+    h("div", { class: "schema-wrap" }, svg)));
+}
+
+// table definition extras: indexes and constraints
+const INDEXES_SQL = `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = %s ORDER BY indexname`;
+const CONSTRAINTS_SQL = `SELECT con.conname, CASE con.contype WHEN 'p' THEN 'primary key' WHEN 'f' THEN 'foreign key' WHEN 'u' THEN 'unique'
+  WHEN 'c' THEN 'check' WHEN 'x' THEN 'exclusion' ELSE con.contype::text END, pg_get_constraintdef(con.oid)
+FROM pg_constraint con JOIN pg_class cl ON cl.oid = con.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE n.nspname = current_schema() AND cl.relname = %s ORDER BY 2, 1`;
+
+async function definitionExtras(name) {
+  const [idx, con] = await Promise.all([guard(() => sql(INDEXES_SQL, [name])), guard(() => sql(CONSTRAINTS_SQL, [name]))]);
+  return [
+    card(cardHead("Indexes", idx ? plural(idx.rows.length, "index") : ""),
+      table([{ label: "Name", mono: true, get: (r) => r[0] }, { label: "Definition", mono: true, get: (r) => h("span", { class: "wrap-any" }, r[1]) }],
+        idx ? idx.rows : [], { emptyView: h("div", { class: "card-pad muted small" }, "No indexes.") })),
+    card(cardHead("Constraints", con ? plural(con.rows.length, "constraint") : ""),
+      table([{ label: "Name", mono: true, get: (r) => r[0] }, { label: "Kind", get: (r) => r[1] },
+             { label: "Definition", mono: true, get: (r) => h("span", { class: "wrap-any" }, r[2]) }],
+        con ? con.rows : [], { emptyView: h("div", { class: "card-pad muted small" }, "No constraints.") }))];
+}
+
+// ------------------------------------------------------------------ SQL editor with saved queries and history
+
+const HISTORY_KEY = "swsdb.sqlhistory";
+const history = {
+  list() { try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); } catch { return []; } },
+  add(q) {
+    try {
+      const items = [q, ...this.list().filter((x) => x !== q)].slice(0, 25);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
+    } catch { /* private window: history is a convenience */ }
+  },
+};
+
+async function dataSql(root) {
+  const q = h("textarea", { class: "mono", "aria-label": "SQL", spellcheck: "false" });
+  q.value = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 1";
+  const ro = h("input", { type: "checkbox", checked: true, "aria-label": "Read only" });
+  const out = h("div", { class: "stack" });
+  const side = h("div", { class: "stack" });
+  const saveName = h("input", { placeholder: "Name to save as", "aria-label": "Query name" });
+  let saved = [], tab = "saved";
+  async function run() {
+    const started = performance.now();
+    const r = await guard(() => api("POST", "/v1/sql", { query: q.value, read_only: ro.checked, max_rows: 500 }));
+    if (!r) return;
+    history.add(q.value.trim());
+    const took = Math.round(performance.now() - started);
+    fill(out, resultChart(r), card(cardHead("Result", `${plural(r.row_count, "row")}${r.truncated ? " (first 500)" : ""} · ${took} ms`,
+      r.columns.length ? btn("CSV", () => download("result.csv", csv(r)), { ico: "download", title: "Download these rows as CSV" }) : null),
+      resultTable(r)));
+    if (tab === "history") drawSide();
+  }
+  async function loadSaved() {
+    const r = await guard(() => api("GET", "/v1/sql/saved"));
+    saved = r ? r.queries : [];
+    drawSide();
+  }
+  async function save() {
+    const n = saveName.value.trim();
+    if (!n) { showError("Give the query a name to save it."); return; }
+    if (await guard(() => api("PUT", `/v1/sql/saved/${encodeURIComponent(n)}`, { query: q.value }))) { toast(`Saved ${n}`); saveName.value = ""; tab = "saved"; loadSaved(); }
+  }
+  function drawSide() {
+    const tabs = h("div", { class: "tabs" }, [["saved", `Saved (${saved.length})`], ["history", "History"]].map(([k, l]) =>
+      h("button", { type: "button", class: tab === k ? "on" : null, onclick: () => { tab = k; drawSide(); } }, l)));
+    const items = tab === "saved"
+      ? saved.map((x) => h("div", { class: "query-item" },
+          h("button", { type: "button", class: "query-load", title: x.query, onclick: () => { q.value = x.query; run(); } },
+            h("b", {}, x.name), h("span", { class: "tiny muted ellipsis" }, x.query)),
+          h("div", { class: "row" }, btn(x.pinned ? "★" : "☆", async () => {
+            if (await guard(() => api("PUT", `/v1/sql/saved/${encodeURIComponent(x.name)}`, { query: x.query, pinned: !x.pinned }))) {
+              toast(x.pinned ? `Removed ${x.name} from reports` : `Pinned ${x.name} to reports`); loadSaved(); }
+          }, { title: x.pinned ? "Unpin from Reports" : "Pin to Reports" }),
+          btn("", async () => { if (await guard(() => api("DELETE", `/v1/sql/saved/${encodeURIComponent(x.name)}`))) { toast(`Deleted ${x.name}`, "info"); loadSaved(); } },
+            { ico: "trash", title: `Delete ${x.name}` }))))
+      : history.list().map((x) => h("div", { class: "query-item" },
+          h("button", { type: "button", class: "query-load", title: x, onclick: () => { q.value = x; run(); } },
+            h("span", { class: "tiny mono ellipsis" }, x))));
+    fill(side, card(h("div", { class: "card-pad stack tight" }, tabs,
+      items.length ? items : h("div", { class: "small muted" }, tab === "saved"
+        ? "Nothing saved yet: name a query above and save it. Saved queries are shared by everyone with this tenant's keys."
+        : "Queries you run in this browser show here."))));
+  }
+  q.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run();
+    if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveName.focus(); }
+  });
+  const examples = [
+    ["Rows per table", "SELECT table_name, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I', table_name), " +
+      "false, true, '')))[1]::text::bigint AS rows FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 2 DESC"],
+    ["Columns", "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() " +
+      "ORDER BY table_name, ordinal_position"],
+    ["Table sizes", "SELECT relname AS table, pg_size_pretty(pg_total_relation_size(c.oid)) AS size, pg_total_relation_size(c.oid) AS bytes " +
+      "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relkind = 'r' ORDER BY bytes DESC"]];
+  fill(root, h("div", { class: "split" },
+    h("div", { class: "stack" },
+      card(cardHead("SQL", "Runs as this tenant's own Postgres role: its tables only. Ctrl+Enter runs, Ctrl+S saves.",
+          h("label", { class: "row small muted" }, ro, "read only"), btn("Run", run, { kind: "primary", ico: "play", title: "Run (Ctrl+Enter)" })),
+        h("div", { class: "card-pad stack" }, q,
+          h("div", { class: "row between" }, h("div", { class: "chips" }, examples.map(([label, text]) =>
+            h("button", { class: "chip", type: "button", onclick: () => { q.value = text; run(); } }, label))),
+            h("div", { class: "row" }, saveName, btn("Save", save, { ico: "plus", title: "Save this query for the tenant" }))))),
+      out),
+    side));
+  const handed = sessionStorage.getItem("swsdb.sqlload");  // from Reports or the command palette
+  if (handed) { q.value = handed; sessionStorage.removeItem("swsdb.sqlload"); }
+  await loadSaved();
+  run();
+}
+
+// ------------------------------------------------------------------ writing to tables (admin keys only; the server refuses writes from read keys)
+
+const sqlWrite = (query, params) => api("POST", "/v1/sql", { query, params: params || null, read_only: false });
+async function role() {
+  const key = sessionStorage.getItem("swsdb.key") || "";
+  if (!state.role || state.roleKey !== key) {
+    state.role = (await api("GET", "/v1/status").catch(() => ({}))).role || "read";
+    state.roleKey = key;
+  }
+  return state.role;
+}
+
+// one field of a row form: a typed input, and "NULL" for columns that may be empty
+function fieldInput(c, value, isNew) {
+  const isJson = /^json/.test(c.udt_name), isBool = c.udt_name === "bool";
+  const text = value === null || value === undefined ? "" : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
+  const input = isBool
+    ? h("select", { "aria-label": c.column_name }, [["", isNew ? "(default)" : "-"], ["true", "true"], ["false", "false"]].map(([v, l]) =>
+        h("option", { value: v, selected: !isNew && String(value) === v }, l)))
+    : isJson ? h("textarea", { class: "mono", rows: 4, "aria-label": c.column_name }, text)
+      : h("input", { value: isNew ? "" : text, "aria-label": c.column_name,
+                     placeholder: isNew ? (c.column_default ? `default: ${c.column_default}` : c.nullable ? "empty" : "required") : "" });
+  if (isJson && isNew) input.value = "";
+  const nul = c.nullable ? h("input", { type: "checkbox", checked: !isNew && (value === null || value === undefined), title: "NULL" }) : null;
+  if (nul) for (const ev of ["input", "change"]) input.addEventListener(ev, () => { nul.checked = false; });  // a value replaces NULL
+  return { el: h("div", { class: "row" }, h("div", { class: "grow" }, input), nul ? h("label", { class: "row tiny muted" }, nul, "NULL") : null),
+    read: () => (nul && nul.checked ? { set: true, value: null }
+      : input.value === "" ? { set: false } : { set: true, value: input.value }),
+    original: text, isNull: value === null || value === undefined };
+}
+
+function rowEditor(table, cols, row, keys, done) {
+  closeDrawer();
+  const isNew = row === null;
+  const fields = cols.map((c, i) => ({ c, f: fieldInput(c, isNew ? null : row[i], isNew) }));
+  let arm = false;
+  const scrim = h("div", { class: "scrim", onclick: closeDrawer });
+  const drawer = h("aside", { class: "drawer", role: "dialog", "aria-label": isNew ? `New row in ${table}` : `Edit a row of ${table}` });
+  const where = () => {
+    const parts = [], params = [];
+    for (const k of keys) { const i = cols.findIndex((c) => c.column_name === k); parts.push(`${ident(k)} = %s`); params.push(row[i] === null ? null : String(row[i])); }
+    return { sql: parts.join(" AND "), params };
+  };
+  async function save() {
+    const set = [], params = [];
+    for (const { c, f } of fields) {
+      const v = f.read();
+      if (isNew) { if (v.set) { set.push(c.column_name); params.push(v.value); } continue; }
+      const changed = v.set ? (v.value === null ? !f.isNull : f.isNull || v.value !== f.original) : false;
+      if (changed) { set.push(c.column_name); params.push(v.value); }
+    }
+    let r;
+    if (isNew) {
+      r = await guard(() => sqlWrite(set.length
+        ? `INSERT INTO ${ident(table)} (${set.map(ident).join(", ")}) VALUES (${set.map(() => "%s").join(", ")})`
+        : `INSERT INTO ${ident(table)} DEFAULT VALUES`, params));
+    } else {
+      if (!set.length) { toast("Nothing changed", "info"); return; }
+      const w = where();
+      r = await guard(() => sqlWrite(`UPDATE ${ident(table)} SET ${set.map((c) => `${ident(c)} = %s`).join(", ")} WHERE ${w.sql}`, [...params, ...w.params]));
+    }
+    if (r) { toast(isNew ? "Row added" : `Row updated (${plural(r.row_count, "row")})`); closeDrawer(); done(); }
+  }
+  async function remove() {
+    if (!arm) { arm = true; draw(); return; }
+    const w = where();
+    const r = await guard(() => sqlWrite(`DELETE FROM ${ident(table)} WHERE ${w.sql}`, w.params));
+    if (r) { toast(`Deleted ${plural(r.row_count, "row")}`, "info"); closeDrawer(); done(); }
+  }
+  function draw() {
+    fill(drawer,
+      h("div", { class: "row between" }, h("div", {}, h("div", { class: "tiny muted" }, isNew ? "New row in" : "Edit a row of"), h("h2", { class: "mono" }, table)),
+        btn("", closeDrawer, { ico: "x", title: "Close" })),
+      h("div", { class: "stack" }, fields.map(({ c, f }) => h("div", { class: "field" },
+        h("div", { class: "row between" }, h("span", { class: "field-label" }, c.column_name, c.pk ? h("span", { class: "pk" }, " key") : null),
+          h("span", { class: "tiny muted mono" }, `${c.udt_name}${c.nullable ? "" : " · required"}`)), f.el))),
+      h("div", { class: "row between" },
+        isNew ? h("span", { class: "tiny muted" }, "Leave a field empty for its default.") : btn(arm ? "Delete this row now" : "Delete row", remove, { kind: arm ? "danger" : "ghost", ico: "trash" }),
+        h("div", { class: "row" }, btn("Cancel", closeDrawer), btn(isNew ? "Add row" : "Save", save, { kind: "primary", ico: "check" }))));
+  }
+  draw();
+  document.body.append(scrim, drawer);
+}
+
+// ------------------------------------------------------------------ table designer
+
+const COLUMN_TYPES = ["bigint", "integer", "text", "varchar(255)", "numeric", "double precision", "boolean", "date", "timestamptz",
+  "jsonb", "uuid", "text[]"];
+const NAME_OK = /^[a-z_][a-z0-9_]{0,62}$/;
+
+function tableDesigner(tables, done) {
+  closeDrawer();
+  const name = h("input", { placeholder: "table_name", "aria-label": "Table name", class: "mono" });
+  const cols = [{ name: "id", type: "bigint", def: "", notNull: true, pk: true, unique: false, ref: "" },
+                { name: "created_at", type: "timestamptz", def: "now()", notNull: true, pk: false, unique: false, ref: "" }];
+  const preview = h("pre", { class: "codeblock wrap" });
+  const list = h("div", { class: "stack tight" });
+  const refs = tables.map((t) => t.name);
+  function statement() {
+    const n = name.value.trim();
+    const lines = cols.filter((c) => c.name.trim()).map((c) => {
+      const pkIdentity = c.pk && /^(bigint|integer)$/.test(c.type) && !c.def;
+      return [`  ${ident(c.name.trim()).replaceAll("%%", "%")} ${c.type}`, pkIdentity ? "GENERATED BY DEFAULT AS IDENTITY" : "",
+        c.def ? `DEFAULT ${c.def}` : "", c.notNull && !c.pk ? "NOT NULL" : "", c.unique && !c.pk ? "UNIQUE" : "",
+        c.ref ? `REFERENCES ${ident(c.ref).replaceAll("%%", "%")}` : ""].filter(Boolean).join(" ");
+    });
+    const pks = cols.filter((c) => c.pk && c.name.trim()).map((c) => ident(c.name.trim()).replaceAll("%%", "%"));
+    if (pks.length) lines.push(`  PRIMARY KEY (${pks.join(", ")})`);
+    return `CREATE TABLE ${ident(n || "table_name").replaceAll("%%", "%")} (\n${lines.join(",\n")}\n)`;
+  }
+  function problems() {
+    const out = [];
+    if (!NAME_OK.test(name.value.trim())) out.push("The table name: lowercase letters, digits and _ (starting with a letter or _).");
+    if (tables.some((t) => t.name === name.value.trim())) out.push("A table with this name exists.");
+    const names = cols.map((c) => c.name.trim()).filter(Boolean);
+    if (!names.length) out.push("Add at least one column.");
+    if (names.some((x) => !NAME_OK.test(x))) out.push("Column names: lowercase letters, digits and _.");
+    if (new Set(names).size !== names.length) out.push("Two columns have the same name.");
+    return out;
+  }
+  function draw() {
+    fill(list, cols.map((c, i) => {
+      const nm = h("input", { value: c.name, class: "mono", "aria-label": "Column name", oninput: (e) => { c.name = e.target.value; show(); } });
+      const ty = h("select", { "aria-label": "Type", onchange: (e) => { c.type = e.target.value; show(); } },
+        COLUMN_TYPES.map((x) => h("option", { value: x, selected: x === c.type }, x)));
+      const df = h("input", { value: c.def, placeholder: "default", class: "mono", "aria-label": "Default", oninput: (e) => { c.def = e.target.value; show(); } });
+      const ref = h("select", { "aria-label": "References", onchange: (e) => { c.ref = e.target.value; show(); } },
+        h("option", { value: "" }, "no reference"), refs.map((x) => h("option", { value: x, selected: x === c.ref }, `→ ${x}`)));
+      const box = (label, key) => h("label", { class: "row tiny muted" }, h("input", { type: "checkbox", checked: c[key],
+        onchange: (e) => { c[key] = e.target.checked; show(); } }), label);
+      return h("div", { class: "designer-row" }, nm, ty, df, ref, box("key", "pk"), box("required", "notNull"), box("unique", "unique"),
+        btn("", () => { cols.splice(i, 1); draw(); show(); }, { ico: "trash", title: "Remove this column" }));
+    }));
+  }
+  function show() {
+    preview.textContent = statement();
+    const p = problems();
+    fill(issues, p.map((x) => h("div", { class: "tiny warn-text" }, x)));
+  }
+  const issues = h("div", { class: "stack tight" });
+  async function create() {
+    if (problems().length) { show(); return; }
+    const r = await guard(() => sqlWrite(statement()));
+    if (r) { toast(`Created ${name.value.trim()}`); closeDrawer(); done(name.value.trim()); }
+  }
+  name.addEventListener("input", show);
+  draw(); show();
+  const scrim = h("div", { class: "scrim", onclick: closeDrawer });
+  const drawer = h("aside", { class: "drawer wide", role: "dialog", "aria-label": "New table" },
+    h("div", { class: "row between" }, h("h2", {}, "New table"), btn("", closeDrawer, { ico: "x", title: "Close" })),
+    h("div", { class: "field-label" }, "Name"), name,
+    h("div", { class: "row between" }, h("div", { class: "field-label" }, "Columns"),
+      btn("Add column", () => { cols.push({ name: "", type: "text", def: "", notNull: false, pk: false, unique: false, ref: "" }); draw(); show(); }, { ico: "plus" })),
+    list,
+    h("div", { class: "field-label" }, "This is what runs"), preview, issues,
+    h("div", { class: "row end" }, btn("Cancel", closeDrawer), btn("Create table", create, { kind: "primary", ico: "check" })));
+  document.body.append(scrim, drawer);
+}
+
+function columnTools(table, done) {
+  const n = h("input", { placeholder: "new_column", class: "mono", "aria-label": "New column name" });
+  const ty = h("select", { "aria-label": "Type" }, COLUMN_TYPES.map((x) => h("option", { value: x }, x)));
+  const df = h("input", { placeholder: "default (optional)", class: "mono", "aria-label": "Default" });
+  const confirmName = h("input", { placeholder: `type ${table} to delete it`, class: "mono", "aria-label": "Confirm table name" });
+  return card(cardHead("Change the table", "Runs as this tenant's role. Deleting a table can't be undone (take a snapshot first)."),
+    h("div", { class: "card-pad stack" },
+      h("div", { class: "row" }, n, ty, df, btn("Add column", async () => {
+        if (!NAME_OK.test(n.value.trim())) { showError("Column names: lowercase letters, digits and _."); return; }
+        const stmt = `ALTER TABLE ${ident(table).replaceAll("%%", "%")} ADD COLUMN ${ident(n.value.trim()).replaceAll("%%", "%")} ${ty.value}${df.value.trim() ? ` DEFAULT ${df.value.trim()}` : ""}`;
+        if (await guard(() => sqlWrite(stmt))) { toast(`Added ${n.value.trim()}`); done(); }
+      }, { ico: "plus" })),
+      h("div", { class: "row" }, confirmName, btn("Delete table", async () => {
+        if (confirmName.value.trim() !== table) { showError(`Type ${table} to confirm.`); return; }
+        if (await guard(() => sqlWrite(`DROP TABLE ${ident(table).replaceAll("%%", "%")}`))) { toast(`Deleted ${table}`, "info"); location.hash = "data/tables"; }
+      }, { kind: "danger", ico: "trash" }))));
+}
+
+// how to reach one table from code
+function tableApi(name, cols) {
+  const url = location.origin, t = state.tenant;
+  const col = (cols.find((c) => !c.pk) || cols[0] || { column_name: "id" }).column_name;
+  const q = `SELECT * FROM "${name.replaceAll('"', '""')}" WHERE "${col}" = %s LIMIT 100`;
+  const snippets = [
+    ["Python", `from swsdb import SwsDB\n\ndb = SwsDB("${url}", api_key=KEY${t === "default" ? "" : `, tenant="${t}"`})\nrows = db.sql(${JSON.stringify(q)}, [value], read_only=True)["rows"]`],
+    ["TypeScript", `const db = new SwsDB({ url: "${url}", apiKey: KEY${t === "default" ? "" : `, tenant: "${t}"`} });\nconst { rows } = await db.sql(${JSON.stringify(q)}, [value], { readOnly: true });`],
+    ["curl", `curl ${url}/v1/sql -H "api-key: $SWSDB_API_KEY"${t === "default" ? "" : ` -H "swsdb-tenant: ${t}"`} \\\n  -H "content-type: application/json" \\\n  -d '${JSON.stringify({ query: q, params: ["value"], read_only: true })}'`],
+    ["Data API (REST)", `# rows, filtered and sorted (a key sees every row; a signed-in user, what the table's policies allow)\ncurl "${url}/v1/rest/${name}?${col}=eq.value&order=${col}.desc&limit=100" \\\n  -H "Authorization: Bearer $KEY_OR_ACCESS_TOKEN"${t === "default" ? "" : ` -H "swsdb-tenant: ${t}"`}\n\n# insert, update (with a filter), delete (with a filter)\ncurl -X POST "${url}/v1/rest/${name}" -H "Authorization: Bearer $TOKEN" -d '{"${col}": "value"}'\ncurl -X PATCH "${url}/v1/rest/${name}?${col}=eq.value" -H "Authorization: Bearer $TOKEN" -d '{"${col}": "new"}'\ncurl -X DELETE "${url}/v1/rest/${name}?${col}=eq.value" -H "Authorization: Bearer $TOKEN"`]];
+  return card(cardHead("Use this table from code", "Values go in params (never into the SQL text); read_only refuses writes."),
+    h("div", { class: "card-pad stack" }, snippets.map(([label, code]) => h("div", { class: "stack tight" },
+      h("div", { class: "row between" }, h("b", {}, label), copyButton(code)), h("pre", { class: "codeblock wrap" }, code))),
+      h("div", { class: "tiny muted" }, "Columns: ", cols.map((c) => `${c.column_name} (${c.udt_name})`).join(", "))));
+}
+
+// ------------------------------------------------------------------ database objects
+
+const OBJECTS = {
+  functions: ["Functions", `SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS arguments, pg_get_function_result(p.oid) AS returns,
+    l.lanname AS language FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+    WHERE n.nspname = current_schema() ORDER BY 1`],
+  triggers: ["Triggers", `SELECT t.tgname AS name, c.relname AS "table", pg_get_triggerdef(t.oid) AS definition, t.tgenabled <> 'D' AS enabled
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE NOT t.tgisinternal AND n.nspname = current_schema() ORDER BY 2, 1`],
+  enums: ["Enumerated types", `SELECT t.typname AS name, string_agg(e.enumlabel, ', ' ORDER BY e.enumsortorder) AS "values"
+    FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname = current_schema() GROUP BY 1 ORDER BY 1`],
+  views: ["Views", `SELECT table_name AS name, view_definition AS definition FROM information_schema.views
+    WHERE table_schema = current_schema() ORDER BY 1`],
+  indexes: ["Indexes", `SELECT tablename AS "table", indexname AS name, indexdef AS definition FROM pg_indexes
+    WHERE schemaname = current_schema() ORDER BY 1, 2`],
+  extensions: ["Extensions", `SELECT name, installed_version AS installed, default_version AS available, comment FROM pg_available_extensions
+    ORDER BY installed_version IS NULL, name`],
+};
+
+async function dataDatabase(root, which) {
+  const kind = OBJECTS[which] ? which : "functions";
+  const tabs = h("div", { class: "tabs" }, Object.entries(OBJECTS).map(([k, [label]]) =>
+    h("button", { type: "button", class: k === kind ? "on" : null, onclick: () => { location.hash = `data/database/${k}`; } }, label)));
+  const r = await guard(() => sql(OBJECTS[kind][1], null, 1000));
+  if (!r) return;
+  const blurb = {
+    functions: "Functions in this tenant's schema. Create them with CREATE FUNCTION in the SQL tab.",
+    triggers: "Triggers on this tenant's tables.",
+    enums: "Enumerated types (CREATE TYPE ... AS ENUM).",
+    views: "Views in this tenant's schema.",
+    indexes: "Every index on this tenant's tables. The Advisors page points out foreign keys that need one.",
+    extensions: "Extensions on this server: installed ones first. Installing one needs the database owner, not a tenant role.",
+  }[kind];
+  const callable = kind === "functions";
+  const callCol = callable ? [{ label: "", num: true, get: (row) => row[2] === "trigger" ? h("span", { class: "tiny muted" }, "runs from its trigger") : btn("Call", () => rpcDrawer({ name: row[0], arguments: row[1],
+    argnames: String(row[1] || "").split(",").map((x) => x.trim().split(/\s+/)[0]).filter(Boolean) }), { ico: "play" }) }] : [];
+  fill(root, h("div", { class: "stack" }, tabs, card(cardHead(OBJECTS[kind][0], `${plural(r.rows.length, "item")} · ${blurb}`),
+    table([...r.columns.map((c, i) => ({ label: c, mono: c !== "comment", get: (row) => {
+      const v = row[i];
+      if (v === null) return h("span", { class: "muted" }, "-");
+      if (typeof v === "boolean") return v ? pill("yes", "ok", false) : pill("no", "", false);
+      return h("span", { class: "wrap-any small" }, String(v));
+    } })), ...callCol], r.rows, { emptyView: h("div", { class: "card-pad muted small" }, `No ${OBJECTS[kind][0].toLowerCase()} yet.`) }))));
+}
+
+// ------------------------------------------------------------------ reports: saved queries pinned as live charts
+
+view.reports = async (root, _arg, actions) => {
+  fill(actions, btn("Refresh", () => route(), { ico: "refresh" }));
+  fill(root, skeleton("block", 2));
+  const r = await api("GET", "/v1/sql/saved");
+  const pinned = r.queries.filter((q) => q.pinned);
+  if (!pinned.length) {
+    fill(root, card(empty("eval", "No reports yet", "Save a query in Data → SQL and pin it (☆): it shows here as a live chart, run fresh each time you open this page.",
+      btn("Open the SQL editor", () => { location.hash = "data/sql"; }, { kind: "primary" }))));
+    return;
+  }
+  const widgets = pinned.map((q) => {
+    const box = h("div", { class: "card" }, h("div", { class: "card-pad" }, skeleton("block", 1)));
+    (async () => {
+      const res = await sql(q.query, null, 500).catch((e) => ({ error: e.message }));
+      const head = cardHead(q.name, res.error ? "the query failed" : `${plural(res.row_count, "row")} · updated ${rel(q.updated_at)}`,
+        btn("", () => { sessionStorage.setItem("swsdb.sqlload", q.query); location.hash = "data/sql"; }, { ico: "play", title: "Open in the SQL editor" }),
+        btn("", async () => { if (await guard(() => api("PUT", `/v1/sql/saved/${encodeURIComponent(q.name)}`, { query: q.query, pinned: false }))) route(); },
+          { ico: "x", title: "Unpin from reports" }));
+      if (res.error) { fill(box, head, h("div", { class: "card-pad small" }, res.error)); return; }
+      const chart = resultChart(res);
+      fill(box, head, chart ? h("div", { class: "report-chart" }, chart) : resultTable(res));
+    })();
+    return box;
+  });
+  fill(root, h("div", { class: "grid c2" }, widgets));
+};
+
+// ------------------------------------------------------------------ command palette (Ctrl+K)
+
+async function openPalette() {
+  if (document.querySelector(".palette")) return;
+  const input = h("input", { placeholder: "Go to a page, collection, table, saved query or document…", "aria-label": "Search" });
+  const results = h("div", { class: "palette-results" });
+  let items = [], sel = 0, typing;
+  const close = () => { document.querySelectorAll(".palette, .palette-scrim").forEach((e) => e.remove()); };
+  const base = Object.entries(PAGES).map(([k, p]) => ({ group: "Pages", label: p.title, sub: p.sub, go: `#${k}` }));
+  const extra = [];
+  const go = (it) => { close(); location.hash = it.go; };
+  (async () => {
+    const [cols, tbls, saved] = await Promise.all([api("GET", "/v1/collections").catch(() => ({ collections: [] })),
+      sql(TABLES_SQL).catch(() => ({ rows: [] })), api("GET", "/v1/sql/saved").catch(() => ({ queries: [] }))]);
+    for (const c of cols.collections) extra.push({ group: "Collections", label: c.name, sub: [c.vector && "vectors", c.graph && "graph"].filter(Boolean).join(" · "), go: `#collections/${encodeURIComponent(c.name)}` });
+    for (const [n, k, , rows] of tbls.rows) extra.push({ group: "Tables", label: n, sub: `${k} · ${rows === null ? "" : `${num(rows)} rows`}`, go: `#data/tables/${encodeURIComponent(n)}` });
+    for (const q of saved.queries) extra.push({ group: "Saved queries", label: q.name, sub: q.query, go: "#data/sql", query: q.query });
+    draw();
+  })();
+  async function documents(q) {
+    if (q.length < 2) return [];
+    const docCols = state.collections.length ? state.collections : await documentCollections().catch(() => []);
+    const found = await Promise.all(docCols.slice(0, 5).map((c) => api("GET", collPath(c.name, `/documents?limit=5&q=${encodeURIComponent(q)}`))
+      .then((r) => r.documents.map((d) => ({ group: "Documents", label: d.title || d.id, sub: `${c.name} · ${d.id}`, go: `#collections/${encodeURIComponent(c.name)}` })))
+      .catch(() => [])));
+    return found.flat();
+  }
+  function draw(docs = []) {
+    const q = input.value.trim().toLowerCase();
+    items = [...base, ...extra].filter((it) => !q || it.label.toLowerCase().includes(q) || (it.sub || "").toLowerCase().includes(q)).slice(0, 40).concat(docs);
+    sel = Math.min(sel, Math.max(0, items.length - 1));
+    let last = "";
+    fill(results, items.length ? items.map((it, i) => {
+      const head = it.group !== last ? h("div", { class: "palette-group" }, it.group) : null;
+      last = it.group;
+      return [head, h("button", { type: "button", class: `palette-item${i === sel ? " on" : ""}`, onclick: () => {
+        if (it.query) sessionStorage.setItem("swsdb.sqlload", it.query); go(it); } },
+        h("span", {}, it.label), it.sub ? h("span", { class: "tiny muted ellipsis" }, it.sub) : null)];
+    }) : h("div", { class: "card-pad small muted" }, "Nothing matches."));
+  }
+  input.addEventListener("input", () => {
+    sel = 0; draw();
+    clearTimeout(typing);
+    typing = setTimeout(async () => draw(await documents(input.value.trim())), 250);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+    if (e.key === "ArrowDown") { sel = Math.min(items.length - 1, sel + 1); draw(); e.preventDefault(); }
+    if (e.key === "ArrowUp") { sel = Math.max(0, sel - 1); draw(); e.preventDefault(); }
+    if (e.key === "Enter" && items[sel]) { const it = items[sel]; if (it.query) sessionStorage.setItem("swsdb.sqlload", it.query); go(it); }
+  });
+  document.body.append(h("div", { class: "palette-scrim", onclick: close }),
+    h("div", { class: "palette", role: "dialog", "aria-label": "Search" }, input, results));
+  draw();
+  input.focus();
+}
+
+// a document's original file, fetched with the key (a plain link can't send it)
+async function downloadOriginal(collection, id) {
+  const headers = { "swsdb-tenant": state.tenant };
+  const key = sessionStorage.getItem("swsdb.key");
+  if (key) headers["api-key"] = key;
+  const r = await fetch(collPath(collection, `/original/${encodeURIComponent(id)}`), { headers });
+  if (!r.ok) { const body = await r.json().catch(() => ({})); showError(body.message || r.statusText); return; }
+  const name = (r.headers.get("content-disposition") || "").match(/filename="([^"]+)"/);
+  const a = h("a", { href: URL.createObjectURL(await r.blob()), download: name ? name[1] : id });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ------------------------------------------------------------------ Auth: the tenant's end users
+
+view.users = async (root, _arg, actions) => {
+  fill(root, skeleton("block", 2));
+  let q = "", typing;
+  const out = h("div", { class: "stack" });
+  const settingsBox = h("div", { class: "stack" });
+  const find = h("input", { placeholder: "Search by email", "aria-label": "Search users",
+    oninput: (e) => { clearTimeout(typing); typing = setTimeout(() => { q = e.target.value.trim(); load(); }, 250); } });
+  const email = h("input", { placeholder: "email@example.com", "aria-label": "Email", type: "email" });
+  const password = h("input", { placeholder: "password (8+ characters)", "aria-label": "Password", type: "password", autocomplete: "new-password" });
+  const groups = h("input", { placeholder: "groups, e.g. support,hr", "aria-label": "Groups" });
+  async function create() {
+    const r = await guard(() => api("POST", "/v1/auth/users", { email: email.value.trim(), password: password.value,
+      groups: groups.value.split(",").map((x) => x.trim()).filter(Boolean) }));
+    if (r) { toast(`Created ${r.email}`); email.value = ""; password.value = ""; groups.value = ""; load(); }
+  }
+  async function load() {
+    const r = await guard(() => api("GET", `/v1/auth/users?limit=500${q ? `&q=${encodeURIComponent(q)}` : ""}`));
+    if (!r) return;
+    fill(out, card(cardHead("Users", `${num(r.total)} in tenant ${state.tenant}`, find),
+      table([
+        { label: "Email", get: (u) => h("div", {}, h("div", {}, u.email), h("div", { class: "tiny muted mono" }, u.id)) },
+        { label: "Groups", get: (u) => (u.groups.length ? h("div", { class: "row" }, u.groups.map((g) => pill(g, "", false))) : h("span", { class: "muted" }, "-")) },
+        { label: "Status", get: (u) => (u.disabled ? pill("disabled", "bad") : pill("active", "ok")) },
+        { label: "Created", get: (u) => h("span", { class: "muted" }, rel(u.created_at)) },
+        { label: "Last sign-in", get: (u) => (u.last_sign_in_at ? rel(u.last_sign_in_at) : h("span", { class: "muted" }, "never")) },
+        { label: "", num: true, get: (u) => h("div", { class: "row end" },
+          btn(u.disabled ? "Enable" : "Disable", async (e) => { e.stopPropagation();
+            if (await guard(() => api("PATCH", `/v1/auth/users/${u.id}`, { disabled: !u.disabled }))) load(); }),
+          btn("", async (e) => { e.stopPropagation();
+            if (await guard(() => api("DELETE", `/v1/auth/users/${u.id}`))) { toast(`Deleted ${u.email}`, "info"); load(); } },
+            { ico: "trash", title: `Delete ${u.email}` })) },
+      ], r.users, { emptyView: h("div", { class: "card-pad" }, empty("key", "No users yet", "Create one below, or open sign-up so your app's users can sign up themselves.")) })));
+  }
+  async function loadSettings() {
+    const st = await guard(() => api("GET", "/v1/auth/settings"));
+    if (!st) return;
+    const signup = h("input", { type: "checkbox", checked: st.signup, "aria-label": "Open sign-up" });
+    const ttl = h("select", { "aria-label": "Token lifetime" }, [[900, "15 minutes"], [3600, "1 hour"], [86400, "1 day"], [604800, "7 days"]]
+      .map(([v, l]) => h("option", { value: v, selected: v === st.token_ttl_s }, l)));
+    const save = async () => { if (await guard(() => api("PUT", "/v1/auth/settings", { signup: signup.checked, token_ttl_s: Number(ttl.value) }))) toast("Saved"); };
+    signup.addEventListener("change", save); ttl.addEventListener("change", save);
+    let armed = false;
+    const rotate = btn("Sign everyone out", async () => {
+      if (!armed) { armed = true; rotate.textContent = "Click again to sign everyone out"; return; }
+      if (await guard(() => api("POST", "/v1/auth/settings/rotate"))) { toast("Every access token stopped working", "info"); armed = false; rotate.textContent = "Sign everyone out"; }
+    }, { kind: "danger" });
+    const url = location.origin;
+    const code = `curl ${url}/v1/auth/token -H "content-type: application/json" \\\n  -d '{"email": "ana@example.com", "password": "...", "tenant": "${state.tenant}"}'\n\n# then, as that user:\ncurl ${url}/v1/rest/notes -H "Authorization: Bearer $ACCESS_TOKEN"`;
+    fill(settingsBox, card(cardHead("Settings", "How your app's users sign in"),
+      h("div", { class: "card-pad stack" },
+        h("label", { class: "row small" }, signup, "Anyone may sign up (POST /v1/auth/signup, no key needed)"),
+        h("div", { class: "row small" }, "Access tokens last", ttl),
+        h("div", { class: "row between" }, h("span", { class: "tiny muted" }, "Rotating the signing secret ends every session at once, on every server."), rotate))),
+      card(cardHead("From your app", "Sign in, then send the token: it reaches only what policies, exposure and ownership allow"),
+        h("div", { class: "card-pad stack" }, h("div", { class: "row end" }, copyButton(code)), h("pre", { class: "codeblock wrap" }, code))));
+  }
+  fill(actions, btn("Refresh", () => { load(); loadSettings(); }, { ico: "refresh" }));
+  fill(root, h("div", { class: "split" },
+    h("div", { class: "stack" }, out, card(cardHead("New user", "Passwords are stored as scrypt hashes, never in clear."),
+      h("div", { class: "card-pad row" }, email, password, groups, btn("Create user", create, { kind: "primary", ico: "plus" })))),
+    settingsBox));
+  await Promise.all([load(), loadSettings()]);
+};
+
+// ------------------------------------------------------------------ row-level security policies
+
+const POLICY_TEMPLATES = [
+  ["Users see and change their own rows", "ALL", "owner = swsdb_auth.uid()", "owner = swsdb_auth.uid()"],
+  ["Users read every row", "SELECT", "true", ""],
+  ["Users add rows as themselves", "INSERT", "", "owner = swsdb_auth.uid()"],
+  ["A group reads the rows", "SELECT", "'support' = ANY(swsdb_auth.groups())", ""]];
+
+view.policies = async (root, _arg, actions) => {
+  fill(actions, btn("Refresh", () => route(), { ico: "refresh" }));
+  fill(root, skeleton("block", 2));
+  const r = await api("GET", "/v1/policies");
+  const tableCard = (t) => {
+    const name = h("input", { placeholder: "policy name", "aria-label": "Policy name" });
+    const command = h("select", { "aria-label": "Command" }, ["ALL", "SELECT", "INSERT", "UPDATE", "DELETE"].map((c) => h("option", { value: c }, c)));
+    const using = h("input", { placeholder: "using: which rows, e.g. owner = swsdb_auth.uid()", class: "mono grow", "aria-label": "Using" });
+    const check = h("input", { placeholder: "with check: which rows a user may write", class: "mono grow", "aria-label": "Check" });
+    const tmpl = h("select", { "aria-label": "Template", onchange: (e) => {
+      const x = POLICY_TEMPLATES[Number(e.target.value)];
+      if (x) { name.value = x[0].toLowerCase().slice(0, 60); command.value = x[1]; using.value = x[2]; check.value = x[3]; }
+    } }, h("option", { value: "" }, "Start from a template…"), POLICY_TEMPLATES.map((x, i) => h("option", { value: i }, x[0])));
+    const add = async () => {
+      if (await guard(() => api("POST", `/v1/policies/tables/${encodeURIComponent(t.table)}`, { name: name.value.trim(), command: command.value,
+        using: using.value.trim() || null, check: check.value.trim() || null }))) { toast(`Added ${name.value.trim()}`); route(); }
+    };
+    return card(
+      h("div", { class: "card-head" }, h("div", {}, h("h2", { class: "mono" }, t.table),
+          h("div", { class: "sub row" }, t.rls ? pill("row-level security on", "ok", false) : pill("row-level security off", "", false),
+            t.exposed ? pill(`users may ${t.grants.join(", ")}`, "warn", false) : pill("not exposed to users", "", false))),
+        btn(t.exposed ? "Hide from users" : "Expose to users", async () => {
+          if (await guard(() => api("PUT", `/v1/policies/tables/${encodeURIComponent(t.table)}`, { exposed: !t.exposed }))) route();
+        }, { kind: t.exposed ? "ghost" : "primary" })),
+      t.exposed && !t.policies.length ? h("div", { class: "card-pad tiny warn-text" }, "Exposed with no policy: users see no rows at all until you add one.") : null,
+      t.policies.length ? table([
+        { label: "Policy", get: (p) => h("b", {}, p.name) },
+        { label: "For", get: (p) => p.command },
+        { label: "Using (rows)", mono: true, get: (p) => h("span", { class: "wrap-any small" }, p.using || "-") },
+        { label: "Check (writes)", mono: true, get: (p) => h("span", { class: "wrap-any small" }, p.check || "-") },
+        { label: "", num: true, get: (p) => btn("", async () => {
+          if (await guard(() => api("DELETE", `/v1/policies/tables/${encodeURIComponent(t.table)}/${encodeURIComponent(p.name)}`))) route();
+        }, { ico: "trash", title: `Drop ${p.name}` }) }], t.policies) : null,
+      t.exposed ? h("div", { class: "card-pad stack tight" }, h("div", { class: "row" }, tmpl, name, command),
+        h("div", { class: "policy-exprs" }, using, check, btn("Add policy", add, { ico: "plus" })))
+        : h("div", { class: "card-pad tiny muted" }, "Signed-in users can't reach this table. Expose it to turn row-level security on and write its policies."));
+  };
+  const fnRows = r.functions;
+  fill(root,
+    card(h("div", { class: "card-pad small" }, "Signed-in end users reach tables only through the Data API (", h("span", { class: "mono" }, "/v1/rest"),
+      "), as the role ", h("span", { class: "mono" }, r.users_role), ". A table they may reach has row-level security on, and its policies decide which rows; in policies, ",
+      h("span", { class: "mono" }, "swsdb_auth.uid()"), ", ", h("span", { class: "mono" }, ".email()"), " and ", h("span", { class: "mono" }, ".groups()"),
+      " are the signed-in user. API keys aren't bound by policies.")),
+    r.tables.length ? [...r.tables].sort((a, b) => Number(b.exposed) - Number(a.exposed)).map(tableCard)
+      : card(empty("database", "No tables yet", "Create one in Data → Tables.")),
+    card(cardHead("Functions", "Which of the tenant's functions signed-in users may call (POST /v1/rpc/<name>)"),
+      table([{ label: "Function", mono: true, get: (f) => `${f.name}(${f.arguments})` },
+             { label: "Returns", mono: true, get: (f) => f.returns },
+             { label: "", num: true, get: (f) => btn(f.exposed ? "Users may call it" : "Allow users", async () => {
+               if (await guard(() => api("PUT", `/v1/policies/functions/${encodeURIComponent(f.name)}`, { exposed: !f.exposed }))) route();
+             }, { kind: f.exposed ? "ghost" : "primary" }) }], fnRows,
+        { emptyView: h("div", { class: "card-pad muted small" }, "No functions yet: CREATE FUNCTION in the SQL tab.") })));
+};
+
+// ------------------------------------------------------------------ storage
+
+view.storage = async (root, arg, actions) => {
+  fill(root, skeleton("block", 2));
+  const st = await api("GET", "/v1/storage/buckets");
+  const bucket = st.buckets.some((b) => b.name === arg) ? arg : (st.buckets[0] || {}).name;
+  const side = card(h("div", { class: "card-pad stack tight" }, h("b", {}, "Buckets"),
+    h("div", { class: "table-links" }, st.buckets.map((b) => h("a", { href: `#storage/${encodeURIComponent(b.name)}`, class: b.name === bucket ? "on" : null },
+      icon("archive"), h("span", { class: "ellipsis" }, b.name), h("span", { class: "tiny muted" }, b.public ? "public" : num(b.objects))))),
+    (() => {
+      const n = h("input", { placeholder: "new-bucket", "aria-label": "Bucket name" });
+      const pub = h("input", { type: "checkbox", "aria-label": "Public" });
+      return h("div", { class: "stack tight" }, n, h("label", { class: "row tiny muted" }, pub, "public (every key and user of the tenant may read)"),
+        btn("New bucket", async () => { if (await guard(() => api("POST", "/v1/storage/buckets", { name: n.value.trim(), public: pub.checked }))) { location.hash = `storage/${encodeURIComponent(n.value.trim())}`; route(); } }, { ico: "plus" }));
+    })()));
+  const main = h("div", { class: "stack" });
+  fill(actions, btn("Refresh", () => route(), { ico: "refresh" }));
+  fill(root, h("div", { class: "tables-layout" }, side, main));
+  if (!bucket) { fill(main, card(empty("archive", "No buckets yet", "Make one on the left, then upload files: they're kept in Postgres, so snapshots include them."))); return; }
+  const b = st.buckets.find((x) => x.name === bucket);
+  let prefix = "";
+  const fileIn = h("input", { type: "file", multiple: true, class: "hidden" });
+  const prefixIn = h("input", { placeholder: "folder/ (optional)", class: "mono", "aria-label": "Folder" });
+  async function upload(files) {
+    for (const f of files) {
+      const headers = { "swsdb-tenant": state.tenant, "content-type": f.type || "application/octet-stream" };
+      const key = sessionStorage.getItem("swsdb.key");
+      if (key) headers["api-key"] = key;
+      const path = `${prefixIn.value.trim().replace(/^\/+/, "")}${f.name}`;
+      const r = await fetch(`/v1/storage/${encodeURIComponent(bucket)}/${path.split("/").map(encodeURIComponent).join("/")}`, { method: "PUT", headers, body: f });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); showError(e.message || r.statusText); return; }
+    }
+    toast(`Uploaded ${plural(files.length, "file")}`); load();
+  }
+  fileIn.addEventListener("change", () => { upload([...fileIn.files]); fileIn.value = ""; });
+  async function load() {
+    const r = await guard(() => api("GET", `/v1/storage/${encodeURIComponent(bucket)}?prefix=${encodeURIComponent(prefix)}`));
+    if (!r) return;
+    const total = r.objects.reduce((a, o) => a + o.size, 0);
+    fill(main, card(
+      h("div", { class: "card-head" }, h("div", {}, h("h2", { class: "mono" }, bucket),
+          h("div", { class: "sub" }, `${plural(r.objects.length, "file")} · ${bytesText(total)} · ${b.public ? "public: every key and user of the tenant may read" : "private: keys, and each user in their own folder"}`)),
+        h("div", { class: "row" }, prefixIn, btn("Upload", () => fileIn.click(), { kind: "primary", ico: "upload" }), fileIn,
+          btn(b.public ? "Make private" : "Make public", async () => { if (await guard(() => api("PATCH", `/v1/storage/buckets/${encodeURIComponent(bucket)}`, { public: !b.public }))) route(); }))),
+      table([
+        { label: "Path", mono: true, get: (o) => o.path },
+        { label: "Type", get: (o) => h("span", { class: "small muted" }, o.content_type) },
+        { label: "Size", num: true, get: (o) => bytesText(o.size) },
+        { label: "Owner", mono: true, get: (o) => o.owner ? h("span", { class: "tiny" }, o.owner.slice(0, 8)) : h("span", { class: "muted" }, "key") },
+        { label: "Updated", get: (o) => h("span", { class: "muted" }, rel(o.updated_at)) },
+        { label: "", num: true, get: (o) => h("div", { class: "row end" },
+          btn("", () => downloadFile(bucket, o.path), { ico: "download", title: "Download" }),
+          btn("", async () => { if (await guard(() => api("DELETE", `/v1/storage/${encodeURIComponent(bucket)}/${o.path.split("/").map(encodeURIComponent).join("/")}`))) { toast(`Deleted ${o.path}`, "info"); load(); } },
+            { ico: "trash", title: "Delete" })) }],
+        r.objects, { emptyView: h("div", { class: "card-pad" }, empty("upload", "No files yet", "Upload some: HTML and other active files always download, never open as pages.")) })));
+  }
+  await load();
+};
+
+async function downloadFile(bucket, path) {
+  const headers = { "swsdb-tenant": state.tenant };
+  const key = sessionStorage.getItem("swsdb.key");
+  if (key) headers["api-key"] = key;
+  const r = await fetch(`/v1/storage/${encodeURIComponent(bucket)}/${path.split("/").map(encodeURIComponent).join("/")}`, { headers });
+  if (!r.ok) { showError(r.statusText); return; }
+  const a = h("a", { href: URL.createObjectURL(await r.blob()), download: path.split("/").pop() });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ------------------------------------------------------------------ database query statistics (Logs > Database queries)
+
+async function dbQueries(root) {
+  let order = "total";
+  const box = h("div", { class: "stack" });
+  async function load() {
+    const r = await guard(() => api("GET", `/v1/query-stats?limit=100&order=${order}`));
+    if (!r) return;
+    if (!r.available) { fill(box, card(empty("info", "Query statistics aren't available", `${r.reason}. The bundled Postgres loads pg_stat_statements after a restart; on your own Postgres, add it to shared_preload_libraries.`))); return; }
+    const most = Math.max(1, ...r.statements.map((s) => s.total_ms));
+    const sel = h("select", { "aria-label": "Order", onchange: (e) => { order = e.target.value; load(); } },
+      [["total", "Most total time"], ["mean", "Slowest on average"], ["calls", "Most calls"], ["rows", "Most rows"]].map(([v, l]) => h("option", { value: v, selected: v === order }, l)));
+    fill(box, card(cardHead("Database queries", "Postgres's own statistics (pg_stat_statements): values show as $1, so no data appears here", sel,
+        btn("Reset", async () => { if (await guard(() => api("POST", "/v1/query-stats/reset"))) load(); }, { title: "Start counting again (needs a key from the environment)" })),
+      table([
+        { label: "Statement", mono: true, get: (s) => h("span", { class: "wrap-any small", title: s.query }, s.query.length > 220 ? `${s.query.slice(0, 219)}…` : s.query) },
+        { label: "Role", mono: true, get: (s) => h("span", { class: "tiny" }, s.role) },
+        { label: "Calls", num: true, get: (s) => num(s.calls) },
+        { label: "Mean", num: true, get: (s) => `${s.mean_ms} ms` },
+        { label: "Max", num: true, get: (s) => `${s.max_ms} ms` },
+        { label: "Rows", num: true, get: (s) => num(s.rows) },
+        { label: "Cache hit", num: true, get: (s) => (s.cache_hit === null ? "-" : `${(s.cache_hit * 100).toFixed(1)}%`) },
+        { label: "Time consumed", get: (s) => {
+          const b = h("i"); b.style.width = `${Math.max(2, (s.total_ms / most) * 100)}%`;
+          return h("div", { class: "bar-row nolabel", title: `${num(Math.round(s.total_ms))} ms in all` }, h("span", { class: "bar-track" }, b),
+            h("span", { class: "bar-value" }, `${num(Math.round(s.total_ms))} ms`));
+        } }], r.statements, { emptyView: h("div", { class: "card-pad muted small" }, "No statements recorded yet.") })));
+  }
+  fill(root, box);
+  await load();
+}
+
+// call one of the tenant's functions from the Database tab
+function rpcDrawer(fn) {
+  closeDrawer();
+  const args = h("textarea", { class: "mono", rows: 6, "aria-label": "Arguments" }, JSON.stringify(Object.fromEntries((fn.argnames || []).map((n) => [n, null])), null, 2));
+  const out = h("div", { class: "stack" });
+  const scrim = h("div", { class: "scrim", onclick: closeDrawer });
+  const drawer = h("aside", { class: "drawer", role: "dialog", "aria-label": `Call ${fn.name}` },
+    h("div", { class: "row between" }, h("div", {}, h("div", { class: "tiny muted" }, "Call"), h("h2", { class: "mono" }, `${fn.name}(${fn.arguments})`)), btn("", closeDrawer, { ico: "x", title: "Close" })),
+    h("div", { class: "field-label" }, "Arguments (JSON, by name)"), args,
+    h("div", { class: "row end" }, btn("Call", async () => {
+      let body;
+      const fail = (msg) => fill(out, h("pre", { class: "codeblock wrap drawer-error" }, msg));
+      try { body = JSON.parse(args.value || "{}"); } catch (e) { fail(`Arguments: ${e.message}`); return; }
+      try {
+        const r = await api("POST", `/v1/rpc/${encodeURIComponent(fn.name)}`, body);
+        fill(out, h("pre", { class: "codeblock wrap" }, JSON.stringify(r.data, null, 2)));
+      } catch (e) { fail(e instanceof ApiError ? `${e.message} (${e.status} ${e.code})` : String(e)); }
+    }, { kind: "primary", ico: "play" })), out,
+    h("div", { class: "tiny muted" }, `From code: POST ${location.origin}/v1/rpc/${fn.name} with the arguments as JSON. Signed-in users may call it once it's allowed on the Policies page.`));
+  document.body.append(scrim, drawer);
+}
+
 // ------------------------------------------------------------------ shell
 
 function setConn(kind, text) { const c = $("#conn"); c.className = `conn ${kind}`; fill(c, h("span", { class: "d" }), h("span", {}, text)); }
@@ -1542,9 +2709,9 @@ async function applyKey() {
 function init() {
   fill($("#brand-mark"), icon("database"));
   const link = (p) => h("a", { href: `#${p}`, "data-page": p }, icon(PAGES[p].icon), PAGES[p].title.replace(" explorer", ""));
-  fill($("#nav"), h("div", { class: "nav-label" }, "Data"), ["overview", "collections", "search", "graph", "data"].map(link),
-    h("div", { class: "nav-label" }, "Quality"), ["eval", "doctor"].map(link),
-    h("div", { class: "nav-label" }, "Admin"), ["backups"].map(link));
+  fill($("#nav"), h("div", { class: "nav-label" }, "Data"), ["overview", "collections", "search", "graph", "data", "storage", "reports"].map(link),
+    h("div", { class: "nav-label" }, "Quality"), ["eval", "doctor", "advisors", "logs"].map(link),
+    h("div", { class: "nav-label" }, "Admin"), ["users", "policies", "keys", "backups"].map(link));
   setTheme(localStorage.getItem("swsdb.theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
   $("#theme-btn").addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   $("#tenant").value = state.tenant;
@@ -1556,6 +2723,11 @@ function init() {
   });
   drawKeyButton();
   $("#key-btn").addEventListener("click", openKeyDialog);
+  $("#connect-btn").addEventListener("click", openConnect);
+  $("#search-btn").addEventListener("click", openPalette);
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
+  });
   $("#key-input").addEventListener("keydown", (e) => {  // Enter saves (the form's first button would forget the key)
     if (e.key === "Enter") { e.preventDefault(); $("#key-save").click(); $("#key-dialog").close(); }
   });

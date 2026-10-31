@@ -49,7 +49,10 @@ def render_pg_conf(s: Settings) -> str:
         "log_line_prefix = '[postgres] %m [%p] '",
         "log_timezone = 'UTC'",
         "timezone = 'UTC'",
-        *(["shared_preload_libraries = 'age'"] if s.in_postgres("graph") and "graph" in s.engines else []),
+        # query statistics for the console (Logs > Database queries); AGE for the lite profile's graphs
+        "shared_preload_libraries = '" + ",".join(["pg_stat_statements", *(["age"] if s.in_postgres("graph")
+                                                    and "graph" in s.engines else [])]) + "'",
+        "pg_stat_statements.track = top",
         "",
     ])
 

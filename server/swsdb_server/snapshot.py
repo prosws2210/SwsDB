@@ -343,7 +343,12 @@ class Snapshots:
         args, env = sql.tool_args()
         await run_pg(pg_bin("pg_restore"), *args, "--exit-on-error", str(dump), env=env)
         for role in tenant_roles:  # search_path is a role setting, not part of the dump
-            if role.startswith("swsdb_t_"):
+            if role.endswith("__u"):  # a tenant's end-users role works in its tenant's schema
+                owner = role[:-3]
+                schema = "public" if owner == "swsdb_t_default" else owner
+                await sql.execute(pgsql.SQL("ALTER ROLE {} SET search_path = {}").format(
+                    pgsql.Identifier(role), pgsql.Identifier(schema)))
+            elif role.startswith("swsdb_t_"):
                 await sql.execute(pgsql.SQL("ALTER ROLE {r} SET search_path = {r}").format(
                     r=pgsql.Identifier(role)))
         await sql.migrate()  # a snapshot from an older swsdb is brought up to this version's schema
