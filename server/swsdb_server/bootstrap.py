@@ -24,6 +24,7 @@ from .settings import Settings
 USER = "swsdb"
 PG_MAJOR = os.environ.get("SWSDB_PG_MAJOR", "17")
 FALKORDB_MODULE = Path("/opt/swsdb/engines/falkordb/falkordb.so")
+QDRANT_DASHBOARD = Path("/opt/swsdb/engines/qdrant/static")  # Qdrant's web UI, from its official image
 
 
 class BootstrapError(RuntimeError):
@@ -87,7 +88,8 @@ def render_qdrant_config(s: Settings, secret: dict[str, str]) -> str:
             "http_port": 6333,
             "grpc_port": 6334,
             "api_key": secret["qdrant_api_key"],
-            "enable_static_content": False,
+            "enable_static_content": s.qdrant_dashboard and QDRANT_DASHBOARD.is_dir(),
+            "static_content_dir": str(QDRANT_DASHBOARD),
         },
         "cluster": {"enabled": False},
         # A database shouldn't report usage anywhere unless the operator chooses to.

@@ -485,6 +485,14 @@ def _qdrant_filter(where: dict[str, Any] | None) -> dict | None:
     return {"must": must}
 
 
+def _browsed(p: dict) -> dict:
+    payload = dict(p.get("payload") or {})
+    out = {"id": payload.pop("_id", p["id"]), "point_id": p["id"], "payload": payload}
+    if p.get("vector") is not None:
+        out["vector"] = p["vector"]
+    return out
+
+
 class VectorStore:
     in_postgres = False  # the lite profile's pgvector store says True: it is copied with the Postgres dump
     engine = "qdrant"
@@ -630,6 +638,18 @@ class VectorStore:
 
     async def query(self, name: str, body: dict) -> list[dict]:
         return (await self._call("POST", f"/collections/{name}/points/query", json=body))["result"]["points"]
+
+    async def browse(self, name: str, limit: int, offset: str | int | None, where: dict | None,
+                     with_vector: bool = False) -> dict:
+        """A page of points in id order, for looking at the data: {"points", "next"} (next: the offset to pass for
+        the following page, None at the end)."""
+        body: dict[str, Any] = {"limit": limit, "with_payload": True, "with_vector": with_vector}
+        if offset is not None:
+            body["offset"] = offset  # Qdrant's own next_page_offset: an integer or a UUID
+        if (f := _qdrant_filter(where)) is not None:
+            body["filter"] = f
+        r = (await self._call("POST", f"/collections/{name}/points/scroll", json=body))["result"]
+        return {"points": [_browsed(p) for p in r["points"]], "next": r.get("next_page_offset")}
 
     async def scroll(self, name: str, flt: dict, limit: int) -> list[dict]:
         body = {"filter": flt, "limit": limit, "with_payload": True, "with_vector": False}

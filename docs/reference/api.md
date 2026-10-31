@@ -57,11 +57,12 @@ Document ids may contain `/`; encode them in the path (`a%2Fb`).
 |---|---|
 | `PUT /v1/collections/{name}/points` | `{"points": [{"id", "vector", "payload"}]}` (up to 1000) |
 | `POST /v1/collections/{name}/points/get` | `{"ids": [...]}` |
+| `POST /v1/collections/{name}/points/scroll` | `{"limit": 50, "offset": null, "where": {...}, "with_vector": false}`: a page of points in id order, and `next` for the following page |
 | `POST /v1/collections/{name}/points/delete` | `{"ids": [...]}` |
 | `POST /v1/collections/{name}/search` | `{"vector", "limit", "where", "with_payload"}` |
 | `POST /v1/collections/{name}/cypher` | `{"query", "params", "read_only", "timeout_s"}` (`LOAD CSV` is refused) |
 
-On documents collections, search, points/get and Cypher need the admin key (they would skip document readers).
+On documents collections, search, points/get, points/scroll and Cypher need the admin key (they would skip document readers).
 
 ## SQL
 

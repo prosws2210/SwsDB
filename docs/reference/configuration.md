@@ -43,6 +43,7 @@ Keep secrets out of the file: use the `_FILE` variables for them.
 | `SWSDB_NEO4J_URL` | unset | use this Neo4j (5.19 or later, HTTP port) as the graph engine instead ([deployment](../guides/deployment.md#neo4j)) |
 | `SWSDB_NEO4J_USER`, `SWSDB_NEO4J_PASSWORD` †, `SWSDB_NEO4J_DATABASE` | `neo4j`, unset, `neo4j` | its login and database |
 | `SWSDB_EXPOSE_NATIVE` | `false` | make the engines' own ports (5432, 6333, 6379) listen beyond localhost |
+| `SWSDB_QDRANT_DASHBOARD` | `true` | serve Qdrant's own dashboard at `:6333/dashboard` (asks for the Qdrant API key) |
 | `SWSDB_CONFIG_FILE` | `/swsdb/config/swsdb.yaml` | settings file (see above) |
 | `SWSDB_LOG_LEVEL` | `info` | `debug`, `info`, `warning` or `error` |
 | `SWSDB_ENGINE_START_TIMEOUT_S` | `120` | how long an engine may take to start before it's reported failed |

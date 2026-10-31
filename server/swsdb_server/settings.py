@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     data_dir: Path = Path("/swsdb/data")
     run_dir: Path = Path("/run/swsdb")
     expose_native: bool = False
+    # Qdrant's own web dashboard at :6333/dashboard (it asks for the Qdrant API key; reachable from outside the
+    # container only with SWSDB_EXPOSE_NATIVE and the port published)
+    qdrant_dashboard: bool = True
     # host names (and browser origins) accepted besides localhost, IP addresses and the container's hostname
     allowed_hosts: str = ""
     log_level: str = "info"

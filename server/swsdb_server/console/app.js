@@ -234,6 +234,7 @@ const PAGES = {
   collections: { title: "Collections", icon: "database", sub: "Documents, their status in every store, and why anything isn't searchable." },
   search: { title: "Search", icon: "search", sub: "Ask questions as any user and see how each passage was found." },
   graph: { title: "Graph explorer", icon: "graph", sub: "Entities extracted from your documents, how they relate and where they're mentioned." },
+  data: { title: "Data", icon: "file", sub: "Look at the raw data: SQL tables, the graph with Cypher, and every vector point. Through the API, with your key's permissions." },
   eval: { title: "Evaluation", icon: "eval", sub: "Measure retrieval on your own questions and compare configurations with numbers." },
   backups: { title: "Backups", icon: "archive", sub: "Snapshots of every engine at one consistent point, scheduled backups and their copies in S3." },
   doctor: { title: "Doctor", icon: "doctor", sub: "Check that the vector store and the graph agree with Postgres, the source of truth, and repair drift." },
@@ -947,6 +948,254 @@ async function reconnect() {
   } catch { /* still down */ }
 }
 
+// ------------------------------------------------------------------ data browser: SQL, Cypher and vectors, through the API
+
+// a result cell as short text; nodes, edges and paths by their labels and properties
+function cellText(v) {
+  if (v === null || v === undefined) return "null";
+  if (typeof v !== "object") return String(v);
+  if (v.labels && v.properties) return `(${v.labels.join(":")} ${JSON.stringify(v.properties)})`;
+  if (v.type && v.properties && "src" in v) return `[:${v.type} ${JSON.stringify(v.properties)}]`;
+  if (v.nodes && v.edges) return `path of ${v.nodes.length} nodes`;
+  return JSON.stringify(v);
+}
+const clip = (t, n = 140) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+
+function resultTable(res) {
+  if (!res.columns.length) return h("div", { class: "card-pad muted small" }, "Done. The statement returned no rows.");
+  return table(res.columns.map((c, i) => ({ label: c, mono: true, get: (row) => {
+    const t = cellText(row[i]);
+    return h("span", { title: t.length > 140 ? t : null }, clip(t));
+  } })), res.rows, { emptyView: h("div", { class: "card-pad muted small" }, "No rows.") });
+}
+
+// nodes and edges anywhere in a Cypher result, laid out with a small force simulation
+function graphOf(res) {
+  const nodes = new Map(), edges = new Map();
+  const visit = (v) => {
+    if (!v || typeof v !== "object") return;
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (v.labels && v.properties && "id" in v) { nodes.set(String(v.id), v); return; }
+    if (v.type && "src" in v && "dst" in v) { edges.set(String(v.id), v); return; }
+    if (v.nodes && v.edges) { v.nodes.forEach(visit); v.edges.forEach(visit); return; }
+  };
+  res.rows.forEach((r) => r.forEach(visit));
+  return { nodes: [...nodes.values()], edges: [...edges.values()].filter((e) => nodes.has(String(e.src)) && nodes.has(String(e.dst))) };
+}
+
+function nodeName(n) {
+  const p = n.properties || {};
+  if (n.labels.includes("Chunk") && p.ordinal !== undefined) return `chunk ${p.ordinal}`;
+  return String(p.name ?? p.title ?? p.external_id ?? p.key ?? p.id ?? n.labels[0] ?? n.id);
+}
+
+function forceGraph({ nodes, edges }, onPick) {
+  const W = 900, H = 560;
+  const pos = new Map(nodes.map((n, i) => {
+    const a = (2 * Math.PI * i) / Math.max(nodes.length, 1);
+    return [String(n.id), { x: W / 2 + 160 * Math.cos(a), y: H / 2 + 140 * Math.sin(a), vx: 0, vy: 0 }];
+  }));
+  const P = [...pos.values()];
+  // Fruchterman-Reingold: repulsion k²/d, attraction d²/k, a little gravity, steps capped by a cooling temperature
+  const k = 0.6 * Math.sqrt((W * H) / Math.max(P.length, 1));
+  let temp = W / 8;
+  for (let it = 0; it < 300; it++) {
+    for (const p of P) { p.vx = 0; p.vy = 0; }
+    for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
+      const a = P[i], b = P[j], dx = a.x - b.x, dy = a.y - b.y, d = Math.sqrt(dx * dx + dy * dy) || 0.1, f = (k * k) / d;
+      a.vx += (dx / d) * f; a.vy += (dy / d) * f; b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+    }
+    for (const e of edges) {
+      const a = pos.get(String(e.src)), b = pos.get(String(e.dst)), dx = a.x - b.x, dy = a.y - b.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 0.1, f = (d * d) / k;
+      a.vx -= (dx / d) * f; a.vy -= (dy / d) * f; b.vx += (dx / d) * f; b.vy += (dy / d) * f;
+    }
+    for (const p of P) {
+      p.vx += (W / 2 - p.x) * 0.3; p.vy += (H / 2 - p.y) * 0.3;  // keeps separate clusters near each other
+      const d = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1, step = Math.min(d, temp);
+      p.x += (p.vx / d) * step; p.y += (p.vy / d) * step;
+    }
+    temp = Math.max(1, temp * 0.97);
+  }
+  // then fit the drawing to the canvas (no clamping while it settles, so nothing piles up at the edges)
+  const xs = P.map((p) => p.x), ys = P.map((p) => p.y);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const sc = Math.min((W - 180) / ((x1 - x0) || 1), (H - 60) / ((y1 - y0) || 1));
+  for (const p of P) { p.x = 60 + (p.x - x0) * sc; p.y = 30 + (p.y - y0) * sc; }
+  const labels = [...new Set(nodes.map((n) => n.labels[0] || ""))];
+  const palette = ["#8b7bff", "#34d399", "#fbbf24", "#60a5fa", "#f472b6", "#22d3ee", "#fb923c", "#a3e635"];
+  const color = (n) => palette[labels.indexOf(n.labels[0] || "") % palette.length];
+  const svg = s("svg", { class: "graphview tall", viewBox: `0 0 ${W} ${H}` });
+  const g1 = s("g"), g2 = s("g"), g3 = s("g");
+  for (const e of edges) {
+    const a = pos.get(String(e.src)), b = pos.get(String(e.dst));
+    g1.append(s("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y, class: "edge" }));
+    if (edges.length <= 30) g2.append(s("text", { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 3, "text-anchor": "middle", class: "edge-label" }, e.type));
+  }
+  for (const n of nodes) {
+    const p = pos.get(String(n.id)), name = nodeName(n);
+    const node = s("g", { class: "node", transform: `translate(${p.x.toFixed(1)},${p.y.toFixed(1)})` },
+      s("title", {}, `${n.labels.join(":")} ${JSON.stringify(n.properties)}`), s("circle", { r: 8, fill: color(n) }),
+      nodes.length <= 40 || !n.labels.includes("Chunk") ? s("text", { x: 12, y: 4 }, name.length > 22 ? `${name.slice(0, 21)}…` : name) : null);
+    node.addEventListener("click", () => onPick(n));
+    g3.append(node);
+  }
+  svg.append(g1, g2, g3);
+  const legend = h("div", { class: "legend" }, labels.map((l, i) => {
+    const dot = h("i"); dot.style.background = palette[i % palette.length]; return h("span", {}, dot, l || "(no label)");
+  }));
+  return h("div", {}, svg, legend);
+}
+
+function dataTabs(current, onPick) {
+  return h("div", { class: "tabs", role: "tablist" }, [["sql", "SQL"], ["cypher", "Cypher"], ["vectors", "Vectors"]].map(([k, label]) =>
+    h("button", { class: k === current ? "on" : null, role: "tab", "aria-selected": k === current ? "true" : "false",
+                  onclick: () => onPick(k) }, label)));
+}
+
+view.data = async (root, arg, actions) => {
+  const tab = ["sql", "cypher", "vectors"].includes(arg) ? arg : "sql";
+  fill(actions, dataTabs(tab, (k) => { location.hash = `data/${k}`; }));
+  fill(root, skeleton("block", 2));
+  if (tab === "sql") return dataSql(root);
+  if (tab === "cypher") return dataCypher(root);
+  return dataVectors(root);
+};
+
+async function dataSql(root) {
+  const q = h("textarea", { class: "mono", "aria-label": "SQL", spellcheck: "false" });
+  q.value = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 1";
+  const ro = h("input", { type: "checkbox", checked: true, "aria-label": "Read only" });
+  const out = h("div", { class: "stack" });
+  const tables = h("div", { class: "stack" });
+  async function run() {
+    const r = await guard(() => api("POST", "/v1/sql", { query: q.value, read_only: ro.checked, max_rows: 500 }));
+    if (!r) return;
+    fill(out, card(cardHead("Result", `${plural(r.row_count, "row")}${r.truncated ? " (first 500)" : ""}`), resultTable(r)));
+  }
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(); });
+  const list = await guard(() => api("POST", "/v1/sql", { read_only: true, query:
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY 1" }));
+  fill(tables, card(cardHead("Tables", "In this tenant's schema. Click one to look inside."),
+    list && list.rows.length
+      ? table([{ label: "Table", mono: true, get: (r) => r[0] }], list.rows, { onRow: (r) => {
+          q.value = `SELECT * FROM "${String(r[0]).replaceAll('"', '""')}" LIMIT 100`; run(); } })
+      : h("div", { class: "card-pad muted small" }, "No tables yet. Create one with CREATE TABLE.")));
+  fill(root, h("div", { class: "stack" },
+    card(cardHead("SQL", "Runs as this tenant's own Postgres role: its tables only, never swsdb's catalog or another tenant's.",
+        h("label", { class: "row small muted" }, ro, "read only"), btn("Run", run, { kind: "primary", ico: "play", title: "Run (Ctrl+Enter)" })),
+      h("div", { class: "card-pad" }, q)),
+    h("div", { class: "split" }, tables, out)));
+  run();
+}
+
+async function dataCypher(root) {
+  const st = await guard(() => api("GET", "/v1/status"));
+  if (st && st.engines.graph && st.engines.graph.engine === "neo4j") {
+    fill(root, card(empty("graph", "Cypher is off with Neo4j",
+      "Collections share one Neo4j database, so swsdb runs only its own graph queries. Browse the graph in Neo4j's own browser.")));
+    return;
+  }
+  const { collections } = await api("GET", "/v1/collections");
+  const graphs = collections.filter((c) => c.graph);
+  if (!graphs.length) { fill(root, card(empty("graph", "No graphs yet", "Create a collection while the graph engine is enabled."))); return; }
+  let coll = graphs[0].name;
+  const q = h("textarea", { class: "mono", "aria-label": "Cypher", spellcheck: "false" });
+  q.value = "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 60";
+  const ro = h("input", { type: "checkbox", checked: true, "aria-label": "Read only" });
+  const picked = h("div");
+  const out = h("div", { class: "stack" });
+  const sel = h("select", { "aria-label": "Graph", onchange: (e) => { coll = e.target.value; run(); } },
+    graphs.map((c) => h("option", { value: c.name }, c.name)));
+  async function run() {
+    const r = await guard(() => api("POST", collPath(coll, "/cypher"), { query: q.value, read_only: ro.checked }));
+    if (!r) return;
+    const g = graphOf(r);
+    fill(picked);
+    fill(out,
+      g.nodes.length ? card(cardHead("Graph", `${plural(g.nodes.length, "node")}, ${plural(g.edges.length, "relationship")}. Click a node for its properties.`),
+        forceGraph(g, (n) => fill(picked, card(cardHead(nodeName(n), n.labels.join(":")),
+          h("pre", { class: "codeblock wrap" }, JSON.stringify(n.properties, null, 2)))))) : null,
+      picked,
+      card(cardHead("Rows", plural(r.rows.length, "row")), resultTable(r)));
+  }
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(); });
+  const examples = [["Sample", "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 60"],
+    ["Labels", "MATCH (n) RETURN labels(n) AS label, count(n) AS nodes"],
+    ["A document", "MATCH (d:Document)-[h:HAS_CHUNK]->(c:Chunk)-[m:MENTIONS]->(e:Entity) RETURN d, h, c, m, e LIMIT 40"],
+    ["Entities", "MATCH (c:Chunk)-[m:MENTIONS]->(e:Entity) RETURN e.name AS entity, count(c) AS mentions ORDER BY mentions DESC LIMIT 25"]];
+  fill(root, h("div", { class: "stack" },
+    card(cardHead("Cypher", "Runs on this collection's own graph.", sel,
+        h("label", { class: "row small muted" }, ro, "read only"), btn("Run", run, { kind: "primary", ico: "play", title: "Run (Ctrl+Enter)" })),
+      h("div", { class: "card-pad stack" }, q,
+        h("div", { class: "chips" }, examples.map(([label, text]) => h("button", { class: "chip", type: "button",
+          onclick: () => { q.value = text; run(); } }, label))))),
+    out));
+  run();
+}
+
+async function dataVectors(root) {
+  const { collections } = await api("GET", "/v1/collections");
+  const vecs = collections.filter((c) => c.vector);
+  if (!vecs.length) { fill(root, card(empty("vector", "No vector collections yet", "Create a collection with documents or raw vectors."))); return; }
+  let coll = vecs[0].name, next = null, points = [], info = null;
+  const listCard = h("div", { class: "card flush" });
+  const detail = h("div", { class: "stack" });
+  const sel = h("select", { "aria-label": "Collection", onchange: (e) => { coll = e.target.value; load(true); } },
+    vecs.map((c) => h("option", { value: c.name }, c.name)));
+  const isDocs = () => info && info.documents;
+  const preview = (p) => {
+    const pl = p.payload || {};
+    if (isDocs()) return `${pl.doc ?? ""} #${pl.chunk ?? ""}  ${clip(String(pl.text ?? ""), 90)}`;
+    return clip(JSON.stringify(pl), 110);
+  };
+  async function load(reset) {
+    if (reset) { next = null; points = []; info = await guard(() => api("GET", collPath(coll))); fill(detail); }
+    const r = await guard(() => api("POST", collPath(coll, "/points/scroll"), { limit: 50, offset: next }));
+    if (!r) return;
+    points = points.concat(r.points); next = r.next;
+    const v = info && info.vector;
+    fill(listCard, cardHead("Points", v ? `${v.points} points · ${v.size} dimensions · ${v.distance}${v.sparse ? " · with BM25 keywords" : ""}` : ""),
+      table([{ label: "Id", mono: true, get: (p) => clip(String(p.id), 38) },
+             { label: isDocs() ? "Document · chunk · text" : "Payload", get: (p) => h("span", { class: "small" }, preview(p)) },
+             ...(isDocs() ? [{ label: "Live", get: (p) => (p.payload.live ? pill("live", "ok") : pill("hidden", "warn")) }] : [])],
+            points, { onRow: show }),
+      next !== null ? h("div", { class: "card-pad" }, btn("Load more", () => load(false), { ico: "download" })) : null);
+    if (!detail.childNodes.length) fill(detail, card(empty("vector", "Pick a point", "See its payload and vector, and find its nearest neighbours.")));
+  }
+  async function show(p) {
+    const r = await guard(() => api("POST", collPath(coll, "/points/get"), { ids: [p.id] }));
+    const full = r && r.points[0] ? r.points[0] : p;
+    const vec = Array.isArray(full.vector) ? full.vector : full.vector && full.vector.dense;
+    const near = h("div", { class: "stack" });
+    async function similar() {
+      let hits;
+      if (isDocs()) {
+        const res = await guard(() => api("POST", collPath(coll, "/query"), { query: String(full.payload.text || ""), k: 8, mode: "dense", graph_hops: 0 }));
+        hits = res && res.hits.map((x) => ({ id: x.chunk_id, score: x.score, label: `${x.document} #${x.chunk}  ${clip(String(x.text || ""), 80)}` }));
+      } else {
+        const res = vec && await guard(() => api("POST", collPath(coll, "/search"), { vector: vec, limit: 8 }));
+        hits = res && res.hits.map((x) => ({ id: x.id, score: x.score, label: clip(JSON.stringify(x.payload || {}), 80) }));
+      }
+      if (!hits) return;
+      fill(near, card(cardHead("Nearest neighbours", isDocs() ? "by the chunk's text, dense vectors only" : "by this point's vector"),
+        table([{ label: "Id", mono: true, get: (x) => clip(String(x.id), 30) }, { label: "Score", num: true, get: (x) => fmt(x.score) },
+               { label: "", get: (x) => h("span", { class: "small" }, x.label) }], hits)));
+    }
+    fill(detail,
+      card(cardHead(clip(String(p.id), 40), isDocs() ? "a chunk of a document" : "a point", btn("Find similar", similar, { kind: "primary", ico: "search" })),
+        h("div", { class: "card-pad stack" },
+          h("div", { class: "field-label" }, "Payload"), h("pre", { class: "codeblock wrap" }, JSON.stringify(full.payload, null, 2)),
+          vec ? h("div", { class: "field-label" }, `Vector (${vec.length} dimensions)`) : null,
+          vec ? h("pre", { class: "codeblock wrap" }, `[${vec.slice(0, 12).map((x) => Number(x).toFixed(4)).join(", ")}${vec.length > 12 ? ", …" : ""}]`) : null)),
+      near);
+  }
+  fill(root, h("div", { class: "stack" },
+    card(cardHead("Vectors", "Every point of a collection, as the vector store holds it. Read only.", sel)),
+    h("div", { class: "split" }, listCard, detail)));
+  await load(true);
+}
+
 // ------------------------------------------------------------------ shell
 
 function setConn(kind, text) { const c = $("#conn"); c.className = `conn ${kind}`; fill(c, h("span", { class: "d" }), h("span", {}, text)); }
@@ -1015,7 +1264,7 @@ async function applyKey() {
 function init() {
   fill($("#brand-mark"), icon("database"));
   const link = (p) => h("a", { href: `#${p}`, "data-page": p }, icon(PAGES[p].icon), PAGES[p].title.replace(" explorer", ""));
-  fill($("#nav"), h("div", { class: "nav-label" }, "Data"), ["overview", "collections", "search", "graph"].map(link),
+  fill($("#nav"), h("div", { class: "nav-label" }, "Data"), ["overview", "collections", "search", "graph", "data"].map(link),
     h("div", { class: "nav-label" }, "Quality"), ["eval", "doctor"].map(link),
     h("div", { class: "nav-label" }, "Admin"), ["backups"].map(link));
   setTheme(localStorage.getItem("swsdb.theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));

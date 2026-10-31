@@ -50,6 +50,13 @@ def test_vectors(box):
     assert hits[0]["payload"] == {"team": "support", "year": 2025}
     assert [h["id"] for h in docs.search([1, 0, 0], where={"team": "sales"})] == ["handbook#2"]
     assert {h["id"] for h in docs.search([1, 0, 0], where={"year": [2024]})} == {"handbook#2", 7}
+    # paging through every point (the console's vector browser): two pages of 2 and 1, the ids we gave
+    first = docs.browse(limit=2)
+    second = docs.browse(limit=2, offset=first["next"])
+    assert first["next"] is not None and second["next"] is None
+    assert {p["id"] for p in first["points"] + second["points"]} == {"handbook#1", "handbook#2", 7}
+    assert [p["id"] for p in docs.browse(where={"team": "sales"}, with_vector=True)["points"]] == ["handbook#2"]
+    assert docs.browse(where={"team": "sales"}, with_vector=True)["points"][0]["vector"] == pytest.approx([0, 1, 0])
     assert docs.get(["handbook#2"])[0]["vector"] == pytest.approx([0, 1, 0])
     docs.delete(["handbook#2"])
     assert docs.get(["handbook#2"]) == []

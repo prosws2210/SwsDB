@@ -89,6 +89,11 @@ def test_documents_vectors_graph_and_sql(lite, data):
     hits = data.collection("raw").search([1, 0, 0], limit=2)
     assert [h["id"] for h in hits] == ["p1", 2] and hits[0]["score"] == pytest.approx(1.0)
     assert [h["id"] for h in data.collection("raw").search([1, 0, 0], where={"team": "b"})] == [2]
+    page = data.collection("raw").browse(limit=1)
+    rest = data.collection("raw").browse(limit=1, offset=page["next"])
+    assert {p["id"] for p in page["points"] + rest["points"]} == {"p1", 2} and rest["next"] is None
+    chunks = data.collection("kb").browse(limit=100)["points"]
+    assert len(chunks) == len(DOCS) and all(p["payload"]["live"] for p in chunks)
     rows = data.collection("raw").cypher("MATCH p=(a)-[k:KNOWS]->(b) RETURN a.name AS who, k.since, p",
                                          read_only=True)
     assert rows["columns"] == ["who", "k.since", "p"]

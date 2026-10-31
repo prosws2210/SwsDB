@@ -363,6 +363,24 @@ class PgVectorStore:
                 return
             after = rows[-1]["id"]
 
+    async def browse(self, name: str, limit: int, offset: str | int | None, where: dict | None,
+                     with_vector: bool = False) -> dict:
+        coll = await self._coll(name)
+        t, _ = self._tables(coll)
+        params: list = [str(offset) if offset is not None else ""]
+        cond = filter_sql(_qdrant_filter(where), params)
+        vec = pgsql.SQL(", p.vec::text AS vec" if with_vector else "")
+        rows = await self._rows(pgsql.SQL("SELECT p.id, p.payload{} FROM {} p WHERE p.id > %s AND ").format(vec, t)
+                                + pgsql.SQL(cond) + pgsql.SQL(" ORDER BY p.id LIMIT %s"), [*params, limit + 1])
+        out = []
+        for r in rows[:limit]:
+            payload = dict(r["payload"])
+            p = {"id": payload.pop("_id", _id_out(r["id"])), "point_id": _id_out(r["id"]), "payload": payload}
+            if with_vector and r.get("vec"):
+                p["vector"] = json.loads(r["vec"])
+            out.append(p)
+        return {"points": out, "next": rows[limit - 1]["id"] if len(rows) > limit else None}
+
     async def scroll(self, name: str, flt: dict, limit: int) -> list[dict]:
         coll = await self._coll(name)
         t, _ = self._tables(coll)

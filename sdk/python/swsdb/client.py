@@ -250,6 +250,14 @@ class Collection:
             total += self.db._call("PUT", f"/v1/collections/{self.name}/points", {"points": batch})["upserted"]
         return total
 
+    def browse(self, limit: int = 50, offset: str | int | None = None, where: Mapping[str, Any] | None = None,
+               with_vector: bool = False) -> dict:
+        """A page of points in id order: {"points": [{"id", "point_id", "payload"}], "next"}. Pass `next` as
+        `offset` for the following page (None: that was the last one)."""
+        return self.db._call("POST", f"/v1/collections/{self.name}/points/scroll",
+                             {"limit": limit, "offset": offset, "where": dict(where) if where else None,
+                              "with_vector": with_vector})
+
     def search(self, vector: Sequence[float], limit: int = 10, where: Mapping[str, Any] | None = None,
                with_payload: bool = True) -> list[dict]:
         """Nearest points: [{"id", "score", "payload"}]. `where` matches payload fields exactly (lists: any of)."""

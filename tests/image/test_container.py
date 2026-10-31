@@ -147,6 +147,8 @@ def test_first_start_is_ready_with_all_engines(volume, boxes):
                                                                   "graph": "falkordb"}
     assert all(e["version"] for e in st["engines"].values())
     assert took < 60, f"first start took {took:.1f}s"
+    # Qdrant's own dashboard is served (on the native port, so only inside the container unless exposed)
+    assert "<title>UI | Qdrant" in b.exec("curl", "-s", "http://127.0.0.1:6333/dashboard/")
     # nothing listens beyond localhost inside the container except the API
     listening = b.exec("cat", "/proc/net/tcp", "/proc/net/tcp6")
     exposed = {int(line.split()[1].split(":")[1], 16) for line in listening.splitlines()[1:]

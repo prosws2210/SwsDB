@@ -58,6 +58,13 @@ class Ids(BaseModel):
     ids: list[str | int] = Field(min_length=1, max_length=MAX_POINTS)
 
 
+class Browse(BaseModel):
+    limit: int = Field(50, ge=1, le=500)
+    offset: str | int | None = None  # the `next` of the previous page
+    where: dict[str, Any] | None = None
+    with_vector: bool = False
+
+
 class Search(BaseModel):
     vector: list[float] = Field(min_length=1)
     limit: int = Field(10, ge=1, le=1000)
@@ -387,6 +394,13 @@ def router(caller) -> APIRouter:
                             e: Engines = Depends(), _: str = Depends(admin), __: None = Depends(writable)):
         await e.vector.delete(engine_name(t, name), body.ids)
         return {"deleted": len(body.ids)}
+
+    @r.post("/collections/{name}/points/scroll", tags=["vectors"])
+    async def browse_points(body: Browse, name: str = Depends(collection_name), t: str = Depends(tenant),
+                            e: Engines = Depends(), role: str = Depends(require_key)):
+        """Page through a collection's points in id order (the console's vector browser)."""
+        await documents_guard(t, name, e, role, "browsing raw points")
+        return await e.vector.browse(engine_name(t, name), body.limit, body.offset, body.where, body.with_vector)
 
     @r.post("/collections/{name}/search", tags=["vectors"])
     async def search(body: Search, name: str = Depends(collection_name), t: str = Depends(tenant),

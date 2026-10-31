@@ -70,6 +70,7 @@ RUN set -eux; \
 
 # The engines, copied from their official images at pinned versions
 COPY --from=qdrant /qdrant/qdrant /opt/swsdb/engines/qdrant/qdrant
+COPY --from=qdrant /qdrant/static /opt/swsdb/engines/qdrant/static
 COPY --from=qdrant /qdrant/qdrant.spdx.json /opt/swsdb/licenses/qdrant.spdx.json
 COPY --from=falkordb /usr/local/bin/redis-server /usr/local/bin/redis-cli /opt/swsdb/engines/falkordb/
 COPY --from=falkordb /var/lib/falkordb/bin/falkordb.so /opt/swsdb/engines/falkordb/falkordb.so
