@@ -163,7 +163,7 @@ class BucketChange(BaseModel):
 
 class SavedQuery(BaseModel):
     query: str = Field(min_length=1, max_length=100_000)
-    pinned: bool | None = None  # shown on the Reports page; unset keeps what it was
+    pinned: bool | None = None  # shown in the console's Tables > Reports; unset keeps what it was
 
 
 class Search(BaseModel):

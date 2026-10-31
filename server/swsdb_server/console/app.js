@@ -282,12 +282,12 @@ const PAGES = {
   tables: { title: "Tables", icon: "table", engine: "sql", sub: "Tabular data: your tables row by row, their schema, functions and views, and SQL." },
   vectors: { title: "Vectors", icon: "vector", engine: "vector", sub: "Vector data: every collection's points, configuration, indexes, memory and index quality." },
   graph: { title: "Graph", icon: "graph", engine: "graph", sub: "Graph data: the entities extracted from your documents, and every graph with Cypher." },
-  reports: { needs: "sql", title: "Reports", icon: "eval", sub: "Saved queries pinned as live charts: your own dashboard, run fresh each time." },
+  reports: { tab: "tables/reports", needs: "sql", title: "Reports", icon: "eval", sub: "Saved queries pinned as live charts: your own dashboard, run fresh each time." },
   eval: { title: "Evaluation", icon: "eval", sub: "Measure retrieval on your own questions and compare configurations with numbers." },
   advisors: { title: "Advisors", icon: "shield", sub: "Security and performance checks of this server and tenant, each with what to do about it." },
   logs: { title: "Logs", icon: "clock", sub: "Recent API requests on this server and where the time goes, route by route." },
   users: { needs: "sql", title: "Users", icon: "key", sub: "Your app's end users: who may sign in, their groups, and how long a sign-in lasts." },
-  policies: { needs: "sql", title: "Policies", icon: "shield", sub: "Row-level security: which tables and functions signed-in users reach, and which rows." },
+  policies: { tab: "tables/policies", needs: "sql", title: "Policies", icon: "shield", sub: "Row-level security: which tables and functions signed-in users reach, and which rows." },
   storage: { needs: "sql", title: "Storage", icon: "archive", sub: "Files in buckets, kept in Postgres with everything else; each user owns a folder." },
   keys: { title: "API keys", icon: "key", sub: "Keys for one tenant each: make them, see when they were last used, revoke them." },
   backups: { title: "Backups", icon: "archive", sub: "Snapshots of every engine at one consistent point, scheduled backups and their copies in S3." },
@@ -321,11 +321,11 @@ view.overview = async (root, _arg, actions) => {
   const nodes = all.reduce((a, c) => a + (c.info && c.info.graph ? c.info.graph.nodes || 0 : 0), 0);
   const docsTotal = cols.reduce((a, c) => a + c.info.documents.count, 0);
   const sync = st.sync || {};
-  const stat = (ico, color, label, value, foot) => card(h("div", { class: "stat-row" },
+  const stat = (ico, color, label, value, foot, hash) => linkCard(hash, h("div", { class: "stat-row" },
     h("div", { class: "stat" }, h("div", { class: "label" }, label), h("div", { class: "value" }, value),
       h("div", { class: "foot" }, foot)), h("div", { class: `icon-tile ${color}` }, icon(ico))));
 
-  const engineCard = ([cap, e]) => card(
+  const engineCard = ([cap, e]) => linkCard({ sql: "tables", vector: "vectors", graph: "graph" }[cap],
     h("div", { class: "row between" },
       h("div", { class: "row" }, h("div", { class: `icon-tile ${{ sql: "blue", vector: "violet", graph: "amber" }[cap] || ""}` },
         icon({ sql: "database", vector: "vector", graph: "graph" }[cap] || "database")),
@@ -336,6 +336,12 @@ view.overview = async (root, _arg, actions) => {
     sparkline(state.latency[e.engine] || []),
     e.error ? h("div", { class: "tiny muted ellipsis", title: e.error }, e.error) : null,
     e.restarts_seen ? h("div", { class: "tiny muted" }, `${plural(e.restarts_seen, "restart")} seen since start`) : null);
+  // a card that opens a page (the engine's data, the documents)
+  function linkCard(hash, ...children) {
+    const c = card(...children);
+    if (hash) { c.classList.add("hover"); c.title = `Open ${PAGES[hash.split("/")[0]].title}`; c.addEventListener("click", () => { location.hash = hash; }); }
+    return c;
+  }
 
   const pending = sync.pending ?? 0;
   const consistency = card(cardHead("Consistency", "Changes accepted by Postgres, still being applied to the vector store and the graph"),
@@ -399,10 +405,10 @@ view.overview = async (root, _arg, actions) => {
 
   fill(root,
     h("div", { class: "grid c4" },
-      stat("file", "violet", "Documents", num(docsTotal), `${num(totals.ready || 0)} ready · ${num(totals.failed || 0)} failed`),
-      stat("vector", "blue", "Vectors", num(vectors), plural(all.filter((c) => c.vector).length, "collection")),
-      stat("graph", "amber", "Graph nodes", num(nodes), plural(all.filter((c) => c.graph).length, "graph")),
-      stat("zap", pending ? "amber" : "green", "Sync backlog", num(pending), pending ? "being applied" : "every store in sync")),
+      stat("file", "violet", "Documents", num(docsTotal), `${num(totals.ready || 0)} ready · ${num(totals.failed || 0)} failed`, "collections"),
+      stat("vector", "blue", "Vectors", num(vectors), plural(all.filter((c) => c.vector).length, "collection"), "vectors"),
+      stat("graph", "amber", "Graph nodes", num(nodes), plural(all.filter((c) => c.graph).length, "graph"), "graph"),
+      stat("zap", pending ? "amber" : "green", "Sync backlog", num(pending), pending ? "being applied" : "every store in sync", "doctor")),
     h("div", { class: "section-title" }, "Engines"),
     h("div", { class: "grid c3" }, Object.entries(st.engines).map(engineCard)),
     h("div", { class: "split" },
@@ -1527,9 +1533,13 @@ const cypherName = (n) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(n) ? n : `\`${String(
 // Tables (PostgreSQL): #tables, #tables/table/<name>, #tables/schema, #tables/database/<kind>, #tables/sql
 view.tables = async (root, arg, actions) => {
   const [first, ...rest] = (arg || "").split("/");
-  const tab = { table: "tables", schema: "schema", database: "database", sql: "sql" }[first] || "tables";
-  fill(actions, pageTabs("tables", tab, [["tables", "Tables"], ["schema", "Schema"], ["database", "Database"], ["sql", "SQL"]]));
+  const tab = { table: "tables", schema: "schema", database: "database", sql: "sql", reports: "reports", policies: "policies" }[first] || "tables";
+  // a tab with buttons of its own (Refresh) shows them beside the tabs
+  const own = h("div", { class: "row" });
+  fill(actions, own, pageTabs("tables", tab, [["tables", "Tables"], ["schema", "Schema"], ["database", "Database"], ["sql", "SQL"], ["reports", "Reports"], ["policies", "Policies"]]));
   fill(root, skeleton("block", 2));
+  if (tab === "reports") return view.reports(root, rest.join("/") || undefined, own);
+  if (tab === "policies") return view.policies(root, rest.join("/") || undefined, own);
   if (tab === "schema") return dataSchema(root);
   if (tab === "database") return dataDatabase(root, rest[0]);
   if (tab === "sql") return dataSql(root);
@@ -1547,6 +1557,7 @@ view.vectors = async (root, arg, actions) => {
 // addresses from before the Data page was split by engine
 function movedHash(hash) {
   const [page, sub, ...rest] = hash.split("/");
+  if (PAGES[page] && PAGES[page].tab) return [PAGES[page].tab, ...[sub, ...rest].filter(Boolean)].join("/");
   if (page !== "data") return null;
   if (sub === "vectors") return ["vectors", ...rest].join("/");
   if (sub === "cypher") return "graph";
@@ -2972,7 +2983,7 @@ view.reports = async (root, _arg, actions) => {
   const r = await api("GET", "/v1/sql/saved");
   const pinned = r.queries.filter((q) => q.pinned);
   if (!pinned.length) {
-    fill(root, card(empty("eval", "No reports yet", "Save a query in Data → SQL and pin it (☆): it shows here as a live chart, run fresh each time you open this page.",
+    fill(root, card(empty("eval", "No reports yet", "Save a query in the SQL tab and pin it (☆): it shows here as a live chart, run fresh each time you open this page.",
       btn("Open the SQL editor", () => { location.hash = "tables/sql"; }, { kind: "primary" }))));
     return;
   }
@@ -3001,7 +3012,10 @@ async function openPalette() {
   const results = h("div", { class: "palette-results" });
   let items = [], sel = 0, typing;
   const close = () => { document.querySelectorAll(".palette, .palette-scrim").forEach((e) => e.remove()); };
-  const base = Object.entries(PAGES).map(([k, p]) => ({ group: "Pages", label: p.title, sub: p.sub, go: `#${k}` }));
+  const base = [...Object.entries(PAGES).map(([k, p]) => ({ group: "Pages", label: p.title, sub: p.sub, go: `#${p.tab || k}` })),
+    ...[["Schema", "tables/schema", "The tables as a diagram, with their foreign keys"], ["SQL editor", "tables/sql", "Run SQL; save and pin queries"],
+        ["Database objects", "tables/database", "Functions, triggers, types, views, indexes and extensions"],
+        ["Entities", "graph/entities", "What your documents mention, and where"]].map(([label, go, sub]) => ({ group: "Pages", label, sub, go: `#${go}` }))];
   const extra = [];
   const go = (it) => { close(); location.hash = it.go; };
   (async () => {
@@ -3185,7 +3199,7 @@ view.policies = async (root, _arg, actions) => {
       h("span", { class: "mono" }, "swsdb_auth.uid()"), ", ", h("span", { class: "mono" }, ".email()"), " and ", h("span", { class: "mono" }, ".groups()"),
       " are the signed-in user. API keys aren't bound by policies.")),
     r.tables.length ? [...r.tables].sort((a, b) => Number(b.exposed) - Number(a.exposed)).map(tableCard)
-      : card(empty("database", "No tables yet", "Create one in Data → Tables.")),
+      : card(empty("database", "No tables yet", "Create one in the Tables tab.")),
     card(cardHead("Functions", "Which of the tenant's functions signed-in users may call (POST /v1/rpc/<name>)"),
       table([{ label: "Function", mono: true, get: (f) => `${f.name}(${f.arguments})` },
              { label: "Returns", mono: true, get: (f) => f.returns },
@@ -3315,7 +3329,7 @@ function rpcDrawer(fn) {
         fill(out, h("pre", { class: "codeblock wrap" }, JSON.stringify(r.data, null, 2)));
       } catch (e) { fail(e instanceof ApiError ? `${e.message} (${e.status} ${e.code})` : String(e)); }
     }, { kind: "primary", ico: "play" })), out,
-    h("div", { class: "tiny muted" }, `From code: POST ${location.origin}/v1/rpc/${fn.name} with the arguments as JSON. Signed-in users may call it once it's allowed on the Policies page.`));
+    h("div", { class: "tiny muted" }, `From code: POST ${location.origin}/v1/rpc/${fn.name} with the arguments as JSON. Signed-in users may call it once it's allowed in Tables > Policies.`));
   document.body.append(scrim, drawer);
 }
 
@@ -3335,6 +3349,7 @@ async function route(quiet = false) {
   const rest = location.hash.slice(1).split("/").slice(1);
   const arg = rest.length ? decodeURIComponent(rest.join("/")) : undefined;
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.page === name));
+  if (PAGES[name].tab) document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.page === PAGES[name].tab.split("/")[0]));
   $("#title").textContent = PAGES[name].title;
   $("#subtitle").textContent = pageSub(name);
   document.title = `${PAGES[name].title} · swsdb`;
@@ -3408,10 +3423,10 @@ function init() {
   const section = (name) => h("div", { class: "nav-label" }, h("span", { class: "t" }, name));
   fill($("#nav"), link("overview"),
     section("Databases"), ["tables", "vectors", "graph"].map(link),
-    section("Documents"), ["collections", "search"].map(link),
-    section("Workspace"), ["storage", "reports"].map(link),
-    section("Quality"), ["eval", "doctor", "advisors", "logs"].map(link),
-    section("Admin"), ["users", "policies", "keys", "backups"].map(link));
+    section("Documents"), ["collections", "search", "eval"].map(link),
+    section("App"), ["users", "storage"].map(link),
+    section("Operations"), ["doctor", "advisors", "logs"].map(link),
+    section("Admin"), ["keys", "backups"].map(link));
   setTheme(localStorage.getItem("swsdb.theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
   $("#search-btn").prepend(icon("search"));
   $(".tenant-row").prepend(icon("database"));

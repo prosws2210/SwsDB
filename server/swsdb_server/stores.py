@@ -444,7 +444,7 @@ class SqlStore:
 
     async def users_role(self, tenant: str) -> str:
         """The tenant's end-users role, created on first use: it may log in and use the tenant's schema, nothing else
-        until the tenant grants it a table (see the Policies page)."""
+        until the tenant grants it a table (see the console's Tables > Policies)."""
         owner = await self.tenant_role(tenant)
         role = users_role(tenant)
         if role in self._roles.values():
